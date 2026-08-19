@@ -315,3 +315,52 @@ async def test_escalation_notifies_dispatchers(session, fake_bot):
     result = await session.execute(sel(Request).where(Request.status == "new"))
     overdue = [r for r in result.scalars().all() if (datetime.now(timezone.utc) - r.created_at).total_seconds() > 20*60]
     assert len(overdue) == 1
+
+
+@pytest.mark.asyncio
+async def test_worker_registration_requires_name(session, fake_bot):
+    """Worker flow: role -> ФИО -> дисциплина. The name step must not be skippable."""
+    from bot.handlers.common import cmd_start, reg_role_choice, reg_name, reg_worker_category_choice
+    from bot.states import RegistrationStates
+
+    tg_id = 778
+    await create_user(session, telegram_id=4242, role="dispatcher", is_approved=True)
+    await session.commit()
+    state = fsm_for(user_id=tg_id, chat_id=tg_id)
+
+    msg0 = make_message("/start", tg_id=tg_id)
+    await cmd_start(msg0, state, session)
+    await session.commit()
+
+    # pick "Исполнитель" -> must land on the name step, not the category picker
+    cb_role = make_callback("reg_role:worker", tg_id=tg_id)
+    await reg_role_choice(cb_role, state, session)
+    await session.commit()
+    assert await state.get_state() == RegistrationStates.waiting_name
+    assert "ФИО" in cb_role.message.edit_text.call_args[0][0]
+
+    # too-short name is rejected, stays on the same step
+    bad = make_message("Ан", tg_id=tg_id)
+    await reg_name(bad, state, session)
+    assert await state.get_state() == RegistrationStates.waiting_name
+
+    msg1 = make_message("Петров Пётр Петрович", tg_id=tg_id)
+    await reg_name(msg1, state, session)
+    assert await state.get_state() == RegistrationStates.waiting_worker_category
+    assert "дисциплин" in msg1.answer.call_args[0][0].lower()
+
+    cb_cat = make_callback("reg_worker_category:electrician", tg_id=tg_id)
+    await reg_worker_category_choice(cb_cat, state, session, fake_bot)
+    await session.commit()
+
+    u = (await session.execute(select(User).where(User.telegram_id == tg_id))).scalar_one()
+    assert u.full_name == "Петров Пётр Петрович"
+    assert u.role == "worker"
+    assert u.worker_category == "electrician"
+    assert u.is_approved is False
+    assert await state.get_state() is None
+
+    # the dispatcher card carries the real name, never "None"
+    sent = fake_bot.send_message.await_args.args[1]
+    assert "Петров Пётр Петрович" in sent
+    assert "None" not in sent

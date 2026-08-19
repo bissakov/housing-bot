@@ -23,8 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bot.database import async_session, init_db
 from bot.models import Announcement, Request, RequestEvent, User
-
-SEED_TG_START = 8_800_000_000
+from bot.constants import SEED_TG_START  # single source of truth: notify.py skips ids >= this
 
 RESIDENTS = [
     ("Анна Петрова", "12"), ("Михаил Соколов", "34"),

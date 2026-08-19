@@ -5,12 +5,14 @@ Guarded by config.DEV_MODE — never loaded in prod.
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from sqlalchemy import select
+from sqlalchemy import select, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.models import User
+from bot.models import User, Request, Announcement, RequestEvent
 from bot.config import DEV_MODE
+import logging
 from bot.handlers.common import get_main_keyboard
+logger = logging.getLogger(__name__)
 
 router = Router()
 
@@ -107,3 +109,66 @@ async def dev_switch(callback: CallbackQuery, session: AsyncSession, bot: Bot):
     await callback.message.edit_text(f"✅ Роль → <b>{role_label}{extra}</b>\nМеню обновлено.", parse_mode="HTML")
     await callback.message.answer(f"Главное меню | Роль: {role_label}{extra}", reply_markup=kb)
     await callback.answer(f"Switched to {choice}")
+
+@router.message(F.text == "/reset")
+async def dev_reset(message: Message, session: AsyncSession):
+    if not DEV_MODE:
+        await message.answer("⛔ DEV mode disabled. Set DEV_MODE=true in .env to enable /reset.")
+        return
+    res = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
+    user = res.scalar_one_or_none()
+    if not user:
+        await message.answer("Нет профиля — просто /start")
+        return
+    uid = user.id
+    # FK dependents must be cleared first: requests.resident_id / announcements.author_id are NOT NULL,
+    # so any ORM-level cascade would try "SET NULL" and blow up with an IntegrityError.
+    try:
+        # Requests this user works on but does not own: release back to the pool, don't destroy them.
+        await session.execute(
+            update(Request)
+            .where(Request.worker_id == uid, Request.resident_id != uid)
+            .values(worker_id=None, status="new", accepted_at=None)
+            .execution_options(synchronize_session=False)
+        )
+        # Own requests go away entirely (request_events keep the audit trail — no FK there by design).
+        await session.execute(
+            delete(Request)
+            .where(Request.resident_id == uid)
+            .execution_options(synchronize_session=False)
+        )
+        await session.execute(
+            delete(Announcement)
+            .where(Announcement.author_id == uid)
+            .execution_options(synchronize_session=False)
+        )
+        await session.execute(
+            update(RequestEvent)
+            .where(RequestEvent.actor_id == uid)
+            .values(actor_id=None)
+            .execution_options(synchronize_session=False)
+        )
+        # Drop every stale ORM state before removing the row: a Core-level DELETE keeps SQLAlchemy
+        # from cascading over User.requests / User.assigned_requests on flush.
+        session.expunge_all()
+        await session.execute(delete(User).where(User.id == uid).execution_options(synchronize_session=False))
+        await session.commit()
+    except Exception:
+        logger.exception("dev_reset failed for user_id=%s", uid)
+        await session.rollback()
+        # fallback: soft reset — keep the row but clear fields so /start shows the picker
+        res = await session.execute(select(User).where(User.id == uid))
+        user = res.scalar_one_or_none()
+        if user is None:
+            await message.answer("Профиль уже удалён. Отправьте /start.")
+            return
+        user.full_name = None
+        user.apartment = None
+        user.worker_category = None
+        user.role = "resident"
+        user.is_approved = False
+        user.is_on_shift = False
+        await session.commit()
+        await message.answer("⚠️ Есть связанные заявки — профиль сброшен (история сохранена). Отправьте /start для повторной регистрации.")
+        return
+    await message.answer("🗑️ Профиль удалён. Отправьте /start чтобы пройти регистрацию заново (выбор Житель/Исполнитель).")

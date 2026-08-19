@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.config import ADMIN_IDS
+from bot.constants import SEED_TG_START
 from bot.models import User
 
 logger = logging.getLogger(__name__)
@@ -39,7 +40,12 @@ async def _send(bot: Bot, telegram_id: int, text: str, **kwargs) -> bool:
     except TelegramForbiddenError:
         logger.info("telegram_recipient_unreachable recipient=%s", telegram_id)
     except TelegramBadRequest as exc:
-        logger.error("telegram_bad_request recipient=%s error=%s", telegram_id, exc)
+        # "chat not found" just means this account never opened a dialog with the bot
+        # (seed rows, dispatchers added by hand). Not an error, and not worth a traceback.
+        if "chat not found" in str(exc).lower():
+            logger.info("telegram_recipient_unreachable recipient=%s", telegram_id)
+        else:
+            logger.error("telegram_bad_request recipient=%s error=%s", telegram_id, exc)
     except Exception:
         logger.exception("telegram_delivery_failed recipient=%s", telegram_id)
     return False
@@ -78,15 +84,17 @@ async def notify_workers_force(
 
 
 async def notify_dispatchers(
-    bot: Bot, session: AsyncSession, text: str
+    bot: Bot, session: AsyncSession, text: str, **kwargs
 ) -> DeliveryReport:
     result = await session.execute(select(User).where(User.role == "dispatcher"))
     db_dispatchers = result.scalars().all()
     recipients = {user.telegram_id for user in db_dispatchers} | set(ADMIN_IDS)
+    # Synthetic demo accounts have no chat; skip them instead of burning a failed API call each.
+    recipients = {tid for tid in recipients if tid < SEED_TG_START}
 
     delivered = failed = 0
     for telegram_id in recipients:
-        if await _send(bot, telegram_id, text):
+        if await _send(bot, telegram_id, text, **kwargs):
             delivered += 1
         else:
             failed += 1

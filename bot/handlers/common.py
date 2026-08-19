@@ -9,7 +9,9 @@ import logging
 
 from bot.models import User
 from bot.config import ADMIN_IDS
+from bot.constants import CATEGORY_LABELS, REQUEST_CATEGORIES
 from bot.states import RegistrationStates
+from bot.services.notify import notify_dispatchers
 from bot.keyboards import resident_menu, worker_menu, dispatcher_menu, confirm_delete_keyboard, approval_keyboard, cancel_keyboard, reply_cancel_keyboard
 
 router = Router()
@@ -82,6 +84,8 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
         user.is_approved = True
         await session.commit()
 
+    # DEV helper hint: /dev switches instantly; /reset does fresh picker. No auto-re-picker on /start for approved users by design.
+
     # Fresh user: offer resident vs worker self-registration before any text prompts
     if not user.is_approved and not user.full_name and not user.apartment and user.worker_category is None:
         from bot.keyboards import registration_role_keyboard
@@ -93,7 +97,9 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
             reply_markup=registration_role_keyboard(),
         )
         return
-    if not user.is_approved and user.role == "resident" and not user.full_name:
+    if not user.is_approved and user.role in ("resident", "worker") and not user.full_name:
+        # Half-finished registration (bot restarted, FSM lost): resume at step 1 for either role.
+        await state.update_data(reg_role=user.role)
         await message.answer(
             "👋 <b>Добро пожаловать в Домовой</b>\n\n"
             "Здесь можно сообщать о проблемах в доме и следить за их решением.\n\n"
@@ -136,20 +142,23 @@ async def reg_role_choice(callback: CallbackQuery, state: FSMContext, session: A
         return
     choice = callback.data.split(":", 1)[1]
     if choice == "worker":
-        from bot.keyboards import registration_worker_category_keyboard
         result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
         u = result.scalar_one_or_none()
         if u:
             u.role = "worker"
             await session.commit()
-        await state.set_state(RegistrationStates.waiting_worker_category)
-        await callback.message.edit_text("🔧 Выберите вашу дисциплину:", reply_markup=registration_worker_category_keyboard())
+        # Workers give their name first, same as residents — dispatchers approve a person, not a TG id.
+        await state.update_data(reg_role="worker")
+        await callback.message.edit_text("Шаг 1 из 2 — введите ваше ФИО:")
+        await callback.message.answer("Введите ФИО:", reply_markup=reply_cancel_keyboard())
+        await state.set_state(RegistrationStates.waiting_name)
         await callback.answer()
         return
     # resident
+    await state.update_data(reg_role="resident")
     await callback.message.edit_text("Шаг 1 из 2 — введите ваше ФИО:")
     # keep reply keyboard separately
-    await callback.message.answer("Введите ФИО:", reply_markup=__import__("bot.keyboards", fromlist=["reply_cancel_keyboard"]).reply_cancel_keyboard())
+    await callback.message.answer("Введите ФИО:", reply_markup=reply_cancel_keyboard())
     await state.set_state(RegistrationStates.waiting_name)
     await callback.answer()
 
@@ -160,8 +169,7 @@ async def reg_worker_category_choice(callback: CallbackQuery, state: FSMContext,
         await callback.answer()
         return
     cat = callback.data.split(":", 1)[1]
-    from bot.constants import CATEGORY_CHOICES, CATEGORY_LABELS
-    if cat not in CATEGORY_CHOICES:
+    if cat not in REQUEST_CATEGORIES:
         await callback.answer("Неизвестная категория", show_alert=True)
         return
     tid = callback.from_user.id
@@ -171,33 +179,42 @@ async def reg_worker_category_choice(callback: CallbackQuery, state: FSMContext,
         await callback.answer("Сначала /start", show_alert=True)
         await state.clear()
         return
+    data = await state.get_data()
+    full_name = (data.get("full_name") or user.full_name or "").strip()
+    if not full_name:
+        # No name collected (stale FSM after a restart) — send them back to step 1.
+        await callback.message.edit_text("Шаг 1 из 2 — введите ваше ФИО:")
+        await callback.message.answer("Введите ФИО:", reply_markup=reply_cancel_keyboard())
+        await state.update_data(reg_role="worker", worker_category=cat)
+        await state.set_state(RegistrationStates.waiting_name)
+        await callback.answer()
+        return
+    user.full_name = full_name
     user.worker_category = cat
     user.role = "worker"
     user.is_approved = False
-    if not user.full_name:
-        user.full_name = (callback.from_user.full_name or f"ID {tid}").strip()
     await session.commit()
     await state.clear()
     label = CATEGORY_LABELS.get(cat, cat)
-    await callback.message.edit_text(f"Спасибо! Дисциплина: <b>{label}</b>\n⏳ Ожидайте подтверждения диспетчера — вам придёт уведомление.", parse_mode="HTML")
+    await callback.message.edit_text(
+        f"Спасибо, {escape(full_name)}! Дисциплина: <b>{label}</b>\n"
+        "⏳ Ожидайте подтверждения диспетчера — вам придёт уведомление.",
+        parse_mode="HTML",
+    )
     await callback.answer()
     # notify dispatchers reusing approval_keyboard
-    text = f"🆕 <b>Новый исполнитель на подтверждение</b>\n{user.full_name}, категория: {label}, TG ID: <code>{tid}</code>\nНажмите ниже чтобы подтвердить:"
-    res = await session.execute(select(User).where(User.role == "dispatcher"))
-    for d in res.scalars().all():
-        try:
-            await bot.send_message(d.telegram_id, text, parse_mode="HTML", reply_markup=approval_keyboard(user.id))
-        except Exception:
-            import logging as _lg
-            _lg.getLogger(__name__).exception("worker_notify_failed %s", d.telegram_id)
-    if ADMIN_IDS:
-        extra = await session.execute(select(User).where(User.telegram_id.in_(ADMIN_IDS)))
-        for u in extra.scalars().all():
-            if u.role != "dispatcher":
-                try:
-                    await bot.send_message(u.telegram_id, text, parse_mode="HTML", reply_markup=approval_keyboard(user.id))
-                except Exception:
-                    pass
+    text = (
+        f"🆕 <b>Новый исполнитель на подтверждение</b>\n"
+        f"{escape(full_name)}, категория: {label}, TG ID: <code>{tid}</code>\n"
+        f"Нажмите ниже чтобы подтвердить:"
+    )
+    report = await notify_dispatchers(
+        bot, session, text, parse_mode="HTML", reply_markup=approval_keyboard(user.id)
+    )
+    logger.info(
+        "worker_registration_notified user_id=%s delivered=%s failed=%s",
+        user.id, report.delivered, report.failed,
+    )
 
 
 @router.message(RegistrationStates.waiting_name, F.text)
@@ -207,6 +224,15 @@ async def reg_name(message: Message, state: FSMContext, session: AsyncSession):
         await message.answer("Введите корректное ФИО (минимум 3 символа):")
         return
     await state.update_data(full_name=name)
+    data = await state.get_data()
+    if data.get("reg_role") == "worker":
+        from bot.keyboards import registration_worker_category_keyboard
+        await message.answer(
+            "Шаг 2 из 2 — выберите вашу дисциплину:",
+            reply_markup=registration_worker_category_keyboard(),
+        )
+        await state.set_state(RegistrationStates.waiting_worker_category)
+        return
     await message.answer(
         "Шаг 2 из 2 — введите номер квартиры:", reply_markup=reply_cancel_keyboard()
     )
@@ -240,20 +266,13 @@ async def reg_apartment(message: Message, state: FSMContext, session: AsyncSessi
         f"{escape(full_name)}, кв. {escape(apartment)}, TG ID: <code>{tid}</code>\n"
         f"Нажмите ниже чтобы одобрить:"
     )
-    res = await session.execute(select(User).where(User.role == "dispatcher"))
-    for d in res.scalars().all():
-        try:
-            await bot.send_message(d.telegram_id, text, parse_mode="HTML", reply_markup=approval_keyboard(user.id))
-        except Exception:
-            logger.exception("registration_notification_failed recipient=%s", d.telegram_id)
-    if ADMIN_IDS:
-        extra = await session.execute(select(User).where(User.telegram_id.in_(ADMIN_IDS)))
-        for u in extra.scalars().all():
-            if u.role != "dispatcher":
-                try:
-                    await bot.send_message(u.telegram_id, text, parse_mode="HTML", reply_markup=approval_keyboard(user.id))
-                except Exception:
-                    pass
+    report = await notify_dispatchers(
+        bot, session, text, parse_mode="HTML", reply_markup=approval_keyboard(user.id)
+    )
+    logger.info(
+        "resident_registration_notified user_id=%s delivered=%s failed=%s",
+        user.id, report.delivered, report.failed,
+    )
 
 
 # --- announcements paginated single-message ---

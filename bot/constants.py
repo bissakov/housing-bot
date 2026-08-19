@@ -22,3 +22,7 @@ URGENCY_LABELS = {
     "normal": "🟡 Обычный",
     "high": "🔴 Высокий",
 }
+
+# Demo rows seeded by scripts/seed_demo.py use synthetic Telegram ids starting here.
+# They are not real chats, so notification fan-out must skip them.
+SEED_TG_START = 8_800_000_000

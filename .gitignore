@@ -1,0 +1,10 @@
+bot.db
+bot.log
+*.db
+.env
+.idea/
+*.pyc
+__pycache__/
+*.sqlite
+venv/
+.vscode/

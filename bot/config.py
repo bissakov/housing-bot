@@ -1,6 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
 from pydantic import Field, field_validator
@@ -25,6 +26,7 @@ class Settings(BaseSettings):
     admin_ids: Annotated[set[int], NoDecode] = Field(default_factory=set)
     dev_mode: bool = False
     escalation_minutes: int = Field(default=20, ge=1, le=24 * 60)
+    display_timezone: str = "Asia/Almaty"
     redis_url: str = ""
 
     llm_enabled: bool = False
@@ -47,6 +49,18 @@ class Settings(BaseSettings):
                 return {int(item.strip()) for item in value.split(",") if item.strip()}
             except ValueError as exc:
                 raise ValueError("ADMIN_IDS must be comma-separated integers") from exc
+        return value
+
+    @field_validator("display_timezone")
+    @classmethod
+    def validate_display_timezone(cls, value: str) -> str:
+        value = value.strip()
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError(
+                "DISPLAY_TIMEZONE must be a valid IANA timezone, for example Asia/Almaty"
+            ) from exc
         return value
 
     def validate_runtime(self) -> None:
@@ -72,6 +86,7 @@ DATABASE_URL = settings.database_url
 ADMIN_IDS = settings.admin_ids
 DEV_MODE = settings.dev_mode
 ESCALATION_MINUTES = settings.escalation_minutes
+DISPLAY_TIMEZONE = settings.display_timezone
 REDIS_URL = settings.redis_url
 LLM_ENABLED = settings.llm_enabled
 LLM_API_KEY = settings.llm_api_key

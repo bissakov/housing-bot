@@ -14,6 +14,15 @@ def test_settings_reject_invalid_escalation_interval():
         Settings(escalation_minutes=0)
 
 
+def test_settings_default_to_kazakhstan_display_timezone():
+    assert Settings().display_timezone == "Asia/Almaty"
+
+
+def test_settings_reject_invalid_display_timezone():
+    with pytest.raises(ValidationError, match="DISPLAY_TIMEZONE"):
+        Settings(display_timezone="UTC+5")
+
+
 def test_settings_reject_invalid_llm_threshold():
     with pytest.raises(ValidationError):
         Settings(llm_auto_category_threshold=1.5)

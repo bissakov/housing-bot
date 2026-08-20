@@ -19,6 +19,7 @@ from bot.auth import is_approved_resident
 from bot.callbacks import ResidentRequestCallback
 from bot.constants import URGENCY_LABELS
 from bot.i18n import category_label, t
+from bot.timezone import format_local
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -90,7 +91,7 @@ async def build_resident_list(session: AsyncSession, resident_db_id: int, page: 
         desc = escape(req.description.strip().replace("\n", " "))
         if len(desc) > 60:
             desc = desc[:60] + "…"
-        date = req.created_at.strftime("%d.%m %H:%M") if req.created_at else ""
+        date = format_local(req.created_at, "%d.%m %H:%M", "")
         lines.append(f"<b>#{req.id}</b> {CATEGORY_LABELS.get(req.category, req.category)} {STATUS_LABELS.get(req.status, req.status)}{w_str} • {date}\n<i>{desc}</i>\n")
 
     text = "\n".join(lines)
@@ -136,9 +137,9 @@ async def build_resident_detail(session: AsyncSession, request_id: int, page: in
         f"{URGENCY_LABELS.get(req.urgency, req.urgency)} приоритет\n\n"
         f"🧰 <b>Исполнитель:</b> {escape(w_str)}\n\n"
         f"📝 <b>Описание</b>\n{escape(req.description)}\n\n"
-        f"🕒 Создана: {req.created_at.strftime('%d.%m.%Y в %H:%M') if req.created_at else '—'}\n"
-        f"{('▶️ Принята: ' + req.accepted_at.strftime('%d.%m.%Y в %H:%M')) if req.accepted_at else ''}\n"
-        f"{('✅ Закрыта: ' + req.closed_at.strftime('%d.%m.%Y в %H:%M')) if req.closed_at else ''}"
+        f"🕒 Создана: {format_local(req.created_at, '%d.%m.%Y в %H:%M')}\n"
+        f"{('▶️ Принята: ' + format_local(req.accepted_at, '%d.%m.%Y в %H:%M')) if req.accepted_at else ''}\n"
+        f"{('✅ Закрыта: ' + format_local(req.closed_at, '%d.%m.%Y в %H:%M')) if req.closed_at else ''}"
     )
     if req.completion_result:
         result_label = "выполнена" if req.completion_result == "done" else "не выполнена"

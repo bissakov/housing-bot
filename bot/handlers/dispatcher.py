@@ -23,6 +23,7 @@ from bot.callbacks import (
     DispatcherHistoryCallback,
     DispatcherFilteredRequestCallback,
 )
+from bot.timezone import format_local
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -127,7 +128,7 @@ async def build_dispatcher_list(
         desc = escape(req.description.strip().replace("\n", " "))
         if len(desc) > 60:
             desc = desc[:60] + "…"
-        date = req.created_at.strftime("%d.%m %H:%M") if req.created_at else ""
+        date = format_local(req.created_at, "%d.%m %H:%M", "")
         lines.append(
             f"<b>#{req.id}</b> {CATEGORY_LABELS.get(req.category, req.category)} {STATUS_LABELS.get(req.status, req.status)}{w_str}\n"
             f"{resident_str} • {date}\n"
@@ -224,9 +225,9 @@ async def build_request_detail(
         f" • кв. {escape(resident.apartment or '?') if resident else '?'}\n"
         f"🧰 <b>Исполнитель:</b> {escape(w.full_name or str(w.telegram_id)) if w else 'не назначен'}\n\n"
         f"📝 <b>Описание</b>\n{escape(req.description)}\n\n"
-        f"🕒 Создана: {req.created_at.strftime('%d.%m.%Y в %H:%M') if req.created_at else '—'}\n"
-        f"{('▶️ Принята: ' + req.accepted_at.strftime('%d.%m.%Y в %H:%M')) if req.accepted_at else ''}\n"
-        f"{('✅ Закрыта: ' + req.closed_at.strftime('%d.%m.%Y в %H:%M')) if req.closed_at else ''}"
+        f"🕒 Создана: {format_local(req.created_at, '%d.%m.%Y в %H:%M')}\n"
+        f"{('▶️ Принята: ' + format_local(req.accepted_at, '%d.%m.%Y в %H:%M')) if req.accepted_at else ''}\n"
+        f"{('✅ Закрыта: ' + format_local(req.closed_at, '%d.%m.%Y в %H:%M')) if req.closed_at else ''}"
     )
 
     llm_flag = " ✨ ИИ" if getattr(req, "llm_meta", None) else ""
@@ -457,7 +458,7 @@ async def request_history(
     if not events:
         lines.append("История пока отсутствует.")
     for event in events:
-        timestamp = event.created_at.strftime("%d.%m.%Y %H:%M") if event.created_at else "—"
+        timestamp = format_local(event.created_at, "%d.%m.%Y %H:%M")
         actor = "система"
         if event.actor:
             actor = event.actor.full_name or str(event.actor.telegram_id)
@@ -579,7 +580,7 @@ async def build_pending_list(session: AsyncSession, page: int) -> tuple[str, Inl
     lines = [f"⏳ <b>На подтверждение</b> — стр {page+1}/{total_pages} (всего {total})\nНажмите 📄 чтобы открыть карточку\n"]
     for u in pending:
         role_label = {"resident": "Житель", "worker": "Исполнитель"}.get(u.role, u.role)
-        lines.append(f"<b>#{u.id}</b> {role_label} • TG <code>{u.telegram_id}</code> • {u.created_at.strftime('%d.%m %H:%M') if u.created_at else ''}\n{u.full_name or '—'} кв.{u.apartment or '—'} {f'({u.worker_category})' if u.worker_category else ''}\n")
+        lines.append(f"<b>#{u.id}</b> {role_label} • TG <code>{u.telegram_id}</code> • {format_local(u.created_at, '%d.%m %H:%M', '')}\n{u.full_name or '—'} кв.{u.apartment or '—'} {f'({u.worker_category})' if u.worker_category else ''}\n")
     text = "\n".join(lines)
     rows: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
@@ -612,7 +613,7 @@ async def build_pending_detail(session: AsyncSession, user_id: int, page: int) -
         f"Имя: {u.full_name or '—'} | Кв: {u.apartment or '—'}\n"
         f"Категория: {u.worker_category or '—'}\n"
         f"Роль: {u.role} | Одобрен: {u.is_approved}\n"
-        f"Создан: {u.created_at.strftime('%d.%m %H:%M') if u.created_at else '—'}"
+        f"Создан: {format_local(u.created_at, '%d.%m %H:%M')}"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Одобрить", callback_data=f"approve:{u.id}"), InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject:{u.id}")],

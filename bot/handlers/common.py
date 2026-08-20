@@ -15,6 +15,7 @@ from bot.states import RegistrationStates
 from bot.services.notify import notify_dispatchers
 from bot.i18n import t
 from bot.keyboards import resident_menu, worker_menu, dispatcher_menu, confirm_delete_keyboard, approval_keyboard, cancel_keyboard, reply_cancel_keyboard, language_keyboard
+from bot.timezone import format_local
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -335,7 +336,7 @@ async def build_announcements(session: AsyncSession, page: int, viewer: User) ->
     lines = [heading]
     for i, ann in enumerate(anns, 1):
         idx = page * PAGE_SIZE + i
-        ts = ann.created_at.strftime("%d.%m %H:%M") if ann.created_at else ""
+        ts = format_local(ann.created_at, "%d.%m %H:%M", "")
         preview = escape(ann.text.strip().replace("\n", " "))
         if len(preview) > 80:
             preview = preview[:80] + "…"
@@ -370,7 +371,7 @@ async def build_announcement_detail(session: AsyncSession, ann_id: int, page: in
     ann = res.scalar_one_or_none()
     if not ann:
         return t("not_found_announcement", viewer.language), InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=t("back", viewer.language), callback_data=f"ann_list:{page}")]])
-    text = f"📢 <b>{t('announcement', viewer.language)} #{ann.id}</b>\n{ann.created_at.strftime('%d.%m %H:%M') if ann.created_at else ''}\n\n{escape(ann.text)}"
+    text = f"📢 <b>{t('announcement', viewer.language)} #{ann.id}</b>\n{format_local(ann.created_at, '%d.%m %H:%M', '')}\n\n{escape(ann.text)}"
     rows: list[list[InlineKeyboardButton]] = []
     if is_administrator(viewer):
         rows.append([InlineKeyboardButton(text="🗑️ Удалить это объявление", callback_data=f"delete_ann:{ann.id}")])

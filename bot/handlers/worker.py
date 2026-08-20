@@ -23,6 +23,7 @@ from bot.callbacks import WorkerAvailableCallback, WorkerAssignedCallback
 from bot.constants import URGENCY_LABELS
 from bot.services.llm import get_llm
 from bot.states import WorkerCompletionStates
+from bot.timezone import format_local
 
 router = Router()
 
@@ -62,7 +63,7 @@ async def build_worker_available(session: AsyncSession, user: User, page: int) -
         desc = escape(req.description.strip().replace("\n", " "))
         if len(desc) > 55:
             desc = desc[:55] + "…"
-        date = req.created_at.strftime("%d.%m %H:%M") if req.created_at else ""
+        date = format_local(req.created_at, "%d.%m %H:%M", "")
         priority = URGENCY_LABELS.get(req.urgency, "Обычный")
         lines.append(f"<b>#{req.id}</b> • {priority} • {escape(addr)} {escape(resident.full_name if resident else '')} • {date}\n<i>{desc}</i>\n")
     text = "\n".join(lines)
@@ -218,7 +219,7 @@ async def w_av_view(
         f"📍 <b>Адрес:</b> {escape(addr)}\n"
         f"👤 <b>Житель:</b> {escape(resident.full_name if resident else '—')}\n\n"
         f"📝 <b>Описание</b>\n{escape(req.description)}\n\n"
-        f"🕒 Создана: {req.created_at.strftime('%d.%m.%Y в %H:%M') if req.created_at else '—'}"
+        f"🕒 Создана: {format_local(req.created_at, '%d.%m.%Y в %H:%M')}"
     )
     # keep pagination back + claim
     kb = InlineKeyboardMarkup(inline_keyboard=[

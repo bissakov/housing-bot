@@ -26,7 +26,13 @@ BOT_TOKEN=123:ABC
 ADMIN_IDS=123456,789012   # telegram IDs of administrators
 DATABASE_URL=sqlite+aiosqlite:///./bot.db   # or postgresql+asyncpg://user:pass@localhost/botdb
 ESCALATION_MINUTES=20
+DISPLAY_TIMEZONE=Asia/Almaty
 ```
+
+Timestamps are stored and processed in UTC, then converted to
+`DISPLAY_TIMEZONE` when shown to users. The default, `Asia/Almaty`, displays
+Kazakhstan's current UTC+5 civil time. Use an IANA timezone name rather than a
+numeric offset.
 
 ## Run
 

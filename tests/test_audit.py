@@ -29,7 +29,13 @@ async def test_request_lifecycle_writes_audit_events(session):
     )
     ok, _ = await claim_request(session, request.id, worker)
     assert ok
-    ok, _ = await close_request(session, request.id, worker)
+    ok, _ = await close_request(
+        session,
+        request.id,
+        worker,
+        completion_result="done",
+        completion_comment="Кран отремонтирован, протечка устранена.",
+    )
     assert ok
 
     events = (

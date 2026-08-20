@@ -1,4 +1,7 @@
+import json
+
 from aiogram import Router, F, Bot
+from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from sqlalchemy import select, func, case
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -6,12 +9,20 @@ from sqlalchemy.orm import selectinload
 from html import escape
 
 from bot.models import User, Request
-from bot.keyboards import CATEGORY_LABELS, STATUS_LABELS, worker_menu, request_claim_keyboard, request_close_keyboard
+from bot.keyboards import (
+    CATEGORY_LABELS,
+    STATUS_LABELS,
+    worker_menu,
+    request_claim_keyboard,
+    reply_cancel_keyboard,
+)
 from bot.services.requests import claim_request, close_request, get_requests_for_worker
 from bot.services.notify import notify_resident, notify_dispatchers
 from bot.auth import is_approved_worker, can_view_available_request, can_view_assigned_request
 from bot.callbacks import WorkerAvailableCallback, WorkerAssignedCallback
 from bot.constants import URGENCY_LABELS
+from bot.services.llm import get_llm
+from bot.states import WorkerCompletionStates
 
 router = Router()
 
@@ -247,7 +258,10 @@ async def w_my_view(
         f"📝 <b>Описание</b>\n{escape(req.description)}"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Закрыть", callback_data=f"close:{req.id}")],
+        [
+            InlineKeyboardButton(text="✅ Выполнено", callback_data=f"complete:{req.id}:done"),
+            InlineKeyboardButton(text="❌ Не выполнено", callback_data=f"complete:{req.id}:not_done"),
+        ],
         [InlineKeyboardButton(text="◀️ К списку", callback_data=f"w_my_list:{page}")],
     ])
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
@@ -285,27 +299,113 @@ async def handle_claim(callback: CallbackQuery, session: AsyncSession, bot: Bot)
         await notify_dispatchers(bot, session, f"✅ Заявка #{req.id} принята: {worker.full_name or worker.telegram_id} ({CATEGORY_LABELS.get(worker.worker_category,'')})")
 
 
-@router.callback_query(F.data.startswith("close:"))
-async def handle_close(callback: CallbackQuery, session: AsyncSession, bot: Bot):
-    request_id = int(callback.data.split(":")[1])
+@router.callback_query(F.data.startswith("complete:"))
+async def choose_completion_result(
+    callback: CallbackQuery, session: AsyncSession, state: FSMContext
+):
+    _, request_id_raw, completion_result = callback.data.split(":", 2)
+    request_id = int(request_id_raw)
     result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
     actor = result.scalar_one_or_none()
-    if not actor:
-        await callback.answer("Ошибка пользователя", show_alert=True)
+    if not is_approved_worker(actor):
+        await callback.answer("Только для исполнителей", show_alert=True)
         return
-    from bot.config import ADMIN_IDS
-    is_admin = actor.telegram_id in ADMIN_IDS
-    if actor.role not in ("worker", "dispatcher") and not is_admin:
-        await callback.answer("Недостаточно прав", show_alert=True)
+    q = await session.execute(select(Request).where(Request.id == request_id))
+    req = q.scalar_one_or_none()
+    if not req or req.status != "accepted" or not can_view_assigned_request(actor, req):
+        await callback.answer("Заявка недоступна", show_alert=True)
+        return
+    await state.set_state(WorkerCompletionStates.waiting_comment)
+    await state.set_data({"request_id": request_id, "completion_result": completion_result})
+    prompt = (
+        "Кратко опишите, что было сделано. Комментарий обязателен.\n\n"
+        "ИИ бережно улучшит формулировку, не критикуя вашу работу."
+        if completion_result == "done"
+        else "Укажите причину, по которой заявку не удалось выполнить. Комментарий обязателен.\n\n"
+             "ИИ бережно улучшит формулировку, не критикуя вашу работу."
+    )
+    await callback.message.answer(prompt, reply_markup=reply_cancel_keyboard(actor.language))
+    await callback.answer()
+
+
+@router.message(WorkerCompletionStates.waiting_comment)
+async def handle_completion_comment(
+    message: Message, session: AsyncSession, state: FSMContext, bot: Bot
+):
+    raw_comment = (message.text or "").strip()
+    if not raw_comment:
+        await message.answer("Пожалуйста, отправьте текстовый комментарий.")
+        return
+    data = await state.get_data()
+    request_id = data.get("request_id")
+    completion_result = data.get("completion_result")
+    actor_result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
+    actor = actor_result.scalar_one_or_none()
+    q = await session.execute(select(Request).where(Request.id == request_id))
+    req = q.scalar_one_or_none()
+    if (
+        not is_approved_worker(actor)
+        or not req
+        or req.status != "accepted"
+        or not can_view_assigned_request(actor, req)
+    ):
+        await state.clear()
+        await message.answer("Заявка больше недоступна.")
         return
 
-    success, msg = await close_request(session, request_id, actor)
+    final_comment = raw_comment
+    llm_meta = None
+    llm = get_llm()
+    if not llm.enabled:
+        await message.answer(
+            "Сервис ИИ временно недоступен, поэтому комментарий пока нельзя "
+            "проверить. Попробуйте отправить его немного позже."
+        )
+        return
+    try:
+        review = await llm.improve_completion_comment(
+            raw_comment, completion_result, req.description
+        )
+    except Exception:
+        await message.answer(
+            "Не удалось проверить комментарий с помощью ИИ. "
+            "Ваш текст сохранён в форме — попробуйте отправить его ещё раз позже."
+        )
+        return
+    if not review.accepted:
+        suggestion = review.suggestion or (
+            "Опишите выполненную работу." if completion_result == "done"
+            else "Укажите конкретную причину невыполнения."
+        )
+        await message.answer(f"💡 {escape(suggestion)}", parse_mode="HTML")
+        return
+    final_comment = review.improved
+    llm_meta = json.dumps(
+        {"accepted": review.accepted, "suggestion": review.suggestion},
+        ensure_ascii=False,
+    )
+
+    success, msg = await close_request(
+        session,
+        request_id,
+        actor,
+        completion_result=completion_result,
+        completion_comment=final_comment,
+        completion_raw_comment=raw_comment,
+        completion_llm_meta=llm_meta,
+    )
     if not success:
-        await callback.answer(msg, show_alert=True)
+        await message.answer(msg)
         return
     await session.commit()
-    await callback.message.edit_text(callback.message.text + f"\n\n✅ Закрыта")
-    await callback.answer("Заявка закрыта")
+    await state.clear()
+    result_label = "выполнена" if completion_result == "done" else "не выполнена"
+    await message.answer(
+        f"Заявка #{request_id} отмечена как «{result_label}».\n\n"
+        f"Комментарий: {escape(final_comment)}",
+        parse_mode="HTML",
+        reply_markup=worker_menu(actor.is_on_shift, actor.language),
+    )
 
     q = await session.execute(select(Request).where(Request.id == request_id))
     req = q.scalar_one_or_none()
@@ -313,5 +413,16 @@ async def handle_close(callback: CallbackQuery, session: AsyncSession, bot: Bot)
         rres = await session.execute(select(User).where(User.id == req.resident_id))
         resident = rres.scalar_one_or_none()
         if resident:
-            await notify_resident(bot, resident.telegram_id, f"✅ Ваша заявка #{req.id} закрыта. Спасибо!")
-        await notify_dispatchers(bot, session, f"✅ Заявка #{req.id} закрыта исполнителем {actor.full_name or actor.telegram_id}")
+            icon = "✅" if completion_result == "done" else "❌"
+            await notify_resident(
+                bot,
+                resident.telegram_id,
+                f"{icon} Ваша заявка #{req.id} {result_label}.\n"
+                f"Комментарий исполнителя: {final_comment}",
+            )
+        await notify_dispatchers(
+            bot,
+            session,
+            f"Заявка #{req.id} {result_label} исполнителем "
+            f"{actor.full_name or actor.telegram_id}.\nКомментарий: {final_comment}",
+        )

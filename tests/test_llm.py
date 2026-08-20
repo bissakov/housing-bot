@@ -181,6 +181,43 @@ async def test_polish_off_topic_returns_original():
     assert res.off_topic is True
     assert res.text == "напиши рецепт борща"
 
+
+@pytest.mark.asyncio
+async def test_completion_comment_is_gently_improved():
+    c = LLMClient(api_key="sk-test", enabled=True)
+
+    async def fake_chat(messages, temperature=0.2, max_tokens=0, json_mode=False):
+        assert json.loads(messages[-1]["content"])["result"] == "done"
+        return json.dumps({
+            "accepted": True,
+            "improved": "Заменён неисправный кран, протечка устранена.",
+            "suggestion": "",
+        })
+
+    c._chat = fake_chat  # type: ignore
+    result = await c.improve_completion_comment(
+        "поменял кран течи нет", "done", "Течёт кран"
+    )
+    assert result.accepted is True
+    assert result.improved == "Заменён неисправный кран, протечка устранена."
+
+
+@pytest.mark.asyncio
+async def test_completion_comment_requests_missing_reason():
+    c = LLMClient(api_key="sk-test", enabled=True)
+
+    async def fake_chat(messages, temperature=0.2, max_tokens=0, json_mode=False):
+        return json.dumps({
+            "accepted": False,
+            "improved": "",
+            "suggestion": "Укажите, пожалуйста, конкретную причину невыполнения.",
+        })
+
+    c._chat = fake_chat  # type: ignore
+    result = await c.improve_completion_comment("не сделано", "not_done")
+    assert result.accepted is False
+    assert "причину" in result.suggestion
+
 @pytest.mark.asyncio
 async def test_triage():
     c = LLMClient(api_key="sk-test", enabled=True)

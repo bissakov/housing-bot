@@ -81,14 +81,53 @@ async def test_close_only_assigned_worker(session):
     assert ok
     await session.flush()
     # w2 tries to close w1's request
-    ok2, msg2 = await close_request(session, req.id, w2)
+    ok2, msg2 = await close_request(
+        session,
+        req.id,
+        w2,
+        completion_result="done",
+        completion_comment="Протечка устранена.",
+    )
     assert ok2 is False
     assert "не ваша" in msg2
     # w1 can close
-    ok3, _ = await close_request(session, req.id, w1)
+    ok3, _ = await close_request(
+        session,
+        req.id,
+        w1,
+        completion_result="done",
+        completion_comment="Протечка устранена.",
+    )
     assert ok3 is True
     await session.commit()
     assert req.status == "closed"
+
+
+@pytest.mark.asyncio
+async def test_worker_close_requires_result_and_comment(session):
+    resident = await create_user(session, telegram_id=711, role="resident")
+    worker = await create_user(
+        session,
+        telegram_id=722,
+        role="worker",
+        worker_category="plumber",
+        is_on_shift=True,
+    )
+    req = await create_request(
+        session,
+        resident_id=resident.id,
+        category="plumber",
+        description="Течет",
+    )
+    req.status = "accepted"
+    req.worker_id = worker.id
+    await session.flush()
+
+    ok, message = await close_request(session, req.id, worker)
+
+    assert ok is False
+    assert "результат" in message.lower()
+    assert req.status == "accepted"
 
 
 @pytest.mark.asyncio

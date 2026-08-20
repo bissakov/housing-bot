@@ -103,7 +103,9 @@ def request_claim_keyboard(request_id: int) -> InlineKeyboardMarkup:
 
 def request_close_keyboard(request_id: int) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.button(text="✅ Закрыть", callback_data=f"close:{request_id}")
+    b.button(text="✅ Выполнено", callback_data=f"complete:{request_id}:done")
+    b.button(text="❌ Не выполнено", callback_data=f"complete:{request_id}:not_done")
+    b.adjust(2)
     return b.as_markup()
 
 
@@ -113,7 +115,6 @@ def dispatcher_request_keyboard(request_id: int, status: str) -> InlineKeyboardM
         b.button(text="👤 Назначить", callback_data=f"assign:{request_id}")
     elif status == "accepted":
         b.button(text="🔄 Переназначить", callback_data=f"reassign:{request_id}")
-        b.button(text="✅ Закрыть", callback_data=f"close:{request_id}")
     b.button(text="🗑️ Удалить", callback_data=f"delete_req:{request_id}")
     b.adjust(1)
     return b.as_markup()
@@ -123,8 +124,6 @@ def resident_request_keyboard(request_id: int, status: str) -> InlineKeyboardMar
     b = InlineKeyboardBuilder()
     if status == "new":
         b.button(text="🗑️ Удалить заявку", callback_data=f"delete_req:{request_id}")
-    elif status == "accepted":
-        b.button(text="✅ Закрыть", callback_data=f"close:{request_id}")
     b.adjust(1)
     if not b.buttons:
         return InlineKeyboardMarkup(inline_keyboard=[])

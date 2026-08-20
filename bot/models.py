@@ -58,6 +58,10 @@ class Request(Base):
             "urgency IS NULL OR urgency IN ('low', 'normal', 'high')",
             name="ck_requests_urgency",
         ),
+        CheckConstraint(
+            "completion_result IS NULL OR completion_result IN ('done', 'not_done')",
+            name="ck_requests_completion_result",
+        ),
         Index("ix_requests_status_created", "status", "created_at"),
         Index("ix_requests_category_status_created", "category", "status", "created_at"),
         Index("ix_requests_worker_status", "worker_id", "status"),
@@ -78,6 +82,10 @@ class Request(Base):
     urgency: Mapped[str | None] = mapped_column(String(10), nullable=True)
     raw_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     llm_meta: Mapped[str | None] = mapped_column(Text, nullable=True)  # json dump of classify result
+    completion_result: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    completion_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    completion_raw_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    completion_llm_meta: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     resident: Mapped["User"] = relationship("User", back_populates="requests", foreign_keys=[resident_id])
     worker: Mapped["User | None"] = relationship("User", back_populates="assigned_requests", foreign_keys=[worker_id])

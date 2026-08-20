@@ -17,6 +17,10 @@ class RequestStates(StatesGroup):
     waiting_duplicate_decision = State()
 
 
+class WorkerCompletionStates(StatesGroup):
+    waiting_comment = State()
+
+
 class AnnouncementStates(StatesGroup):
     waiting_text = State()
 

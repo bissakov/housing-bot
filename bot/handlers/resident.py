@@ -140,6 +140,13 @@ async def build_resident_detail(session: AsyncSession, request_id: int, page: in
         f"{('▶️ Принята: ' + req.accepted_at.strftime('%d.%m.%Y в %H:%M')) if req.accepted_at else ''}\n"
         f"{('✅ Закрыта: ' + req.closed_at.strftime('%d.%m.%Y в %H:%M')) if req.closed_at else ''}"
     )
+    if req.completion_result:
+        result_label = "выполнена" if req.completion_result == "done" else "не выполнена"
+        text += (
+            f"\n\n📌 <b>Результат:</b> {result_label}\n"
+            f"💬 <b>Комментарий исполнителя:</b> "
+            f"{escape(req.completion_comment or '—')}"
+        )
     # Spec: resident can NOT close; only delete own new. Hide Закрыть for resident.
     rows: list[list[InlineKeyboardButton]] = []
     if req.status == "new" and req.resident_id == viewer.id:

@@ -63,7 +63,16 @@ async def claim_request(session: AsyncSession, request_id: int, worker: User) ->
     return True, "ok"
 
 
-async def close_request(session: AsyncSession, request_id: int, actor: User) -> tuple[bool, str]:
+async def close_request(
+    session: AsyncSession,
+    request_id: int,
+    actor: User,
+    *,
+    completion_result: str | None = None,
+    completion_comment: str | None = None,
+    completion_raw_comment: str | None = None,
+    completion_llm_meta: str | None = None,
+) -> tuple[bool, str]:
     result = await session.execute(select(Request).where(Request.id == request_id))
     req = result.scalar_one_or_none()
     if not req:
@@ -74,17 +83,27 @@ async def close_request(session: AsyncSession, request_id: int, actor: User) -> 
         return False, "Это не ваша заявка"
     if actor.role != "worker" and not is_dispatcher(actor):
         return False, "Недостаточно прав"
+    if completion_result not in {"done", "not_done"}:
+        return False, "Выберите результат: выполнено или не выполнено"
+    if not (completion_comment or "").strip():
+        return False, "Комментарий обязателен"
     conditions = [Request.id == request_id, Request.status == "accepted"]
     if actor.role == "worker":
         conditions.append(Request.worker_id == actor.id)
     upd = await session.execute(
         update(Request).where(*conditions).values(
-            status="closed", closed_at=datetime.now(timezone.utc)
+            status="closed",
+            closed_at=datetime.now(timezone.utc),
+            completion_result=completion_result,
+            completion_comment=(completion_comment or "").strip() or None,
+            completion_raw_comment=(completion_raw_comment or "").strip() or None,
+            completion_llm_meta=completion_llm_meta,
         )
     )
     if upd.rowcount == 0:
         return False, "Заявка уже закрыта или недоступна"
-    session.add(_event(request_id, "closed", actor.id))
+    details = f"completion_result={completion_result}" if completion_result else None
+    session.add(_event(request_id, "closed", actor.id, details))
     await session.flush()
     return True, "ok"
 

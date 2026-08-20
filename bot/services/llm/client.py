@@ -7,7 +7,13 @@ from typing import Optional
 
 import aiohttp
 
-from .prompts import CLASSIFY_PROMPT, DUPLICATE_PROMPT, POLISH_PROMPT, TRIAGE_PROMPT
+from .prompts import (
+    CLASSIFY_PROMPT,
+    COMPLETION_COMMENT_PROMPT,
+    DUPLICATE_PROMPT,
+    POLISH_PROMPT,
+    TRIAGE_PROMPT,
+)
 from bot.constants import REQUEST_CATEGORIES
 
 log = logging.getLogger(__name__)
@@ -67,6 +73,13 @@ class DuplicateResult:
 class PolishResult:
     text: str
     off_topic: bool = False
+
+
+@dataclass
+class CompletionCommentResult:
+    accepted: bool
+    improved: str
+    suggestion: str = ""
 
 
 class LLMClient:
@@ -319,6 +332,39 @@ class LLMClient:
         if len(t) > 1000:
             t = t[:1000]
         return PolishResult(text=t or raw)
+
+    async def improve_completion_comment(
+        self, text: str, result: str, request_description: str = ""
+    ) -> CompletionCommentResult:
+        raw = (text or "").strip()[:MAX_INPUT_CHARS]
+        content = await self._chat(
+            [
+                {"role": "system", "content": COMPLETION_COMMENT_PROMPT},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "result": result if result in {"done", "not_done"} else "",
+                            "comment": raw,
+                            "request_description": (request_description or "")[:800],
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ],
+            temperature=0.2,
+            max_tokens=300,
+            json_mode=True,
+        )
+        data = self._parse_json(content)
+        accepted = data.get("accepted") is True
+        improved = str(data.get("improved", "")).strip()[:800]
+        suggestion = str(data.get("suggestion", "")).strip()[:300]
+        return CompletionCommentResult(
+            accepted=accepted,
+            improved=(improved or raw) if accepted else "",
+            suggestion=suggestion,
+        )
 
 
 # global singleton

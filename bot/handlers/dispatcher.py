@@ -226,6 +226,13 @@ async def build_request_detail(session: AsyncSession, request_id: int, page: int
     llm_flag = " ✨ ИИ" if getattr(req, "llm_meta", None) else ""
     if llm_flag:
         text = text.replace("🧾 <b>", "✨ ИИ-триаж применён\n🧾 <b>", 1)
+    if req.completion_result:
+        result_label = "выполнена" if req.completion_result == "done" else "не выполнена"
+        text += (
+            f"\n\n📌 <b>Результат:</b> {result_label}\n"
+            f"💬 <b>Комментарий исполнителя:</b> "
+            f"{escape(req.completion_comment or '—')}"
+        )
     # Start from existing dispatcher_request_keyboard but add back button
     base_kb = dispatcher_request_keyboard(req.id, req.status)
     # base_kb has rows of 1 button each (or 2), we keep them

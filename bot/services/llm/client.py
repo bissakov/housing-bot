@@ -15,6 +15,8 @@ from .prompts import (
     TRIAGE_PROMPT,
 )
 from bot.constants import REQUEST_CATEGORIES
+from bot.config import DISPLAY_TIMEZONE
+from bot.timezone import local_now
 
 log = logging.getLogger(__name__)
 
@@ -98,6 +100,18 @@ class LLMClient:
     async def _chat(self, messages: list[dict], temperature: float = 0.2, max_tokens: int = 600, json_mode: bool = False) -> str:
         if not self.enabled:
             raise RuntimeError("LLM disabled (no API key or LLM_ENABLED=false)")
+        # Every assistant operation receives a fresh clock context. Static
+        # prompts must never claim a date because long-running bots go stale.
+        now = local_now()
+        clock_context = (
+            f"\n\nТекущее время системы: {now.isoformat(timespec='seconds')}. "
+            f"Часовой пояс: {DISPLAY_TIMEZONE}."
+        )
+        messages = [dict(message) for message in messages]
+        if messages and messages[0].get("role") == "system":
+            messages[0]["content"] = str(messages[0].get("content", "")) + clock_context
+        else:
+            messages.insert(0, {"role": "system", "content": clock_context.strip()})
         url = f"{self.base_url}/chat/completions"
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         payload: dict = {"model": self.model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
@@ -157,7 +171,16 @@ class LLMClient:
             )
         pinned = category if category in VALID_CATEGORIES else None
         # User text travels as a JSON field, never concatenated into the instructions.
-        payload = json.dumps({"text": raw, "known_category": pinned}, ensure_ascii=False)
+        now = local_now()
+        payload = json.dumps(
+            {
+                "text": raw,
+                "known_category": pinned,
+                "current_time": now.isoformat(timespec="seconds"),
+                "timezone": DISPLAY_TIMEZONE,
+            },
+            ensure_ascii=False,
+        )
         content = await self._chat(
             [{"role": "system", "content": CLASSIFY_PROMPT}, {"role": "user", "content": payload}],
             temperature=0.2, max_tokens=400, json_mode=True

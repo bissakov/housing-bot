@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bot.config import ADMIN_IDS
 from bot.constants import SEED_TG_START
 from bot.models import User
+from bot.services.schedules import is_worker_available
 
 logger = logging.getLogger(__name__)
 
@@ -57,16 +58,30 @@ async def notify_workers(
     category: str,
     text: str,
     force_all: bool = False,
+    urgency: str | None = None,
 ) -> DeliveryReport:
     query = select(User).where(
         User.role == "worker",
         User.is_approved.is_(True),
         User.worker_category == category,
     )
-    if not force_all:
-        query = query.where(User.is_on_shift.is_(True))
     result = await session.execute(query)
-    workers = result.scalars().all()
+    category_workers = list(result.scalars().all())
+    if force_all:
+        workers = category_workers
+    else:
+        workers = [
+            worker for worker in category_workers
+            if await is_worker_available(session, worker)
+        ]
+        # Urgent fallback: scheduled but not checked in, then every specialist.
+        if not workers and urgency == "high":
+            workers = [
+                worker for worker in category_workers
+                if await is_worker_available(session, worker, require_checked_in=False)
+            ]
+        if not workers and urgency == "high":
+            workers = category_workers
 
     delivered = failed = 0
     for worker in workers:

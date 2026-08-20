@@ -2,7 +2,7 @@
 
 import logging
 from html import escape
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 from aiogram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -13,6 +13,7 @@ from bot.config import ESCALATION_MINUTES
 from bot.database import async_session
 from bot.models import Request, User
 from bot.services.notify import notify_dispatchers, notify_workers_force
+from bot.timezone import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ async def escalate_overdue_requests(
     The conditional UPDATE is the idempotency boundary. It protects against
     overlapping scheduler invocations, including multiple bot instances.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=escalation_minutes)
+    cutoff = utc_now() - timedelta(minutes=escalation_minutes)
     result = await session.execute(
         select(Request.id).where(
             Request.status == "new",

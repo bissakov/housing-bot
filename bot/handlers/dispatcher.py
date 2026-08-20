@@ -7,9 +7,9 @@ from sqlalchemy.orm import selectinload
 from html import escape
 import logging
 
-from bot.models import User, Request, RequestEvent
+from bot.models import User, Request, RequestEvent, WorkerWorkingHour, WorkerScheduleException
 from bot.constants import URGENCY_LABELS, REQUEST_CATEGORIES
-from bot.states import AnnouncementStates, AddWorkerStates
+from bot.states import AnnouncementStates, AddWorkerStates, ScheduleStates
 from bot.keyboards import (
     CATEGORY_LABELS, STATUS_LABELS,
     dispatcher_request_keyboard, assign_worker_keyboard, category_keyboard, approval_keyboard, cancel_keyboard, reply_cancel_keyboard
@@ -17,6 +17,14 @@ from bot.keyboards import (
 from bot.services.requests import assign_request, create_announcement
 from bot.services.llm import get_llm
 from bot.services.notify import broadcast_announcement
+from bot.services.schedules import (
+    WEEKDAY_LABELS,
+    add_local_exception,
+    add_recurring_hours,
+    clear_recurring_hours,
+    parse_local_exception,
+    parse_recurring_hours,
+)
 from bot.auth import is_administrator, is_dispatcher
 from bot.callbacks import (
     DispatcherRequestCallback,
@@ -24,6 +32,8 @@ from bot.callbacks import (
     DispatcherFilteredRequestCallback,
 )
 from bot.timezone import format_local
+from bot.config import DISPLAY_TIMEZONE
+from bot.i18n import category_label, normalize_language, t
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -39,11 +49,11 @@ async def dispatcher_cancel_cb(callback: CallbackQuery, state: FSMContext, sessi
     u = res.scalar_one_or_none()
     kb = get_main_keyboard(u) if u and u.is_approved else None
     try:
-        await callback.message.edit_text("❌ Отмена")
+        await callback.message.edit_text(t("cancel", u.language if u else None))
     except Exception:
         pass
     if kb:
-        await callback.message.answer("Главное меню", reply_markup=kb)
+        await callback.message.answer(t("main_menu", u.language), reply_markup=kb)
     await callback.answer()
 
 @router.message(F.text.in_({"❌ Отмена", "❌ Болдырмау"}))
@@ -55,13 +65,34 @@ async def dispatcher_cancel_text(message: Message, state: FSMContext, session: A
     res = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
     u = res.scalar_one_or_none()
     kb = get_main_keyboard(u) if u and u.is_approved else None
-    await message.answer("❌ Отменено.", reply_markup=kb)
+    await message.answer(t("cancelled", u.language if u else None), reply_markup=kb)
 
 PAGE_SIZE = 5
 
 
 def _is_dispatcher(user: User) -> bool:
     return is_dispatcher(user)
+
+
+async def _require_dispatcher(event: Message | CallbackQuery, session: AsyncSession) -> bool:
+    result = await session.execute(
+        select(User).where(User.telegram_id == event.from_user.id)
+    )
+    user = result.scalar_one_or_none()
+    allowed = is_dispatcher(user)
+    if not allowed:
+        if isinstance(event, CallbackQuery):
+            await event.answer(t("insufficient_rights", user.language if user else None), show_alert=True)
+        else:
+            await event.answer(t("insufficient_rights", user.language if user else None))
+    return allowed
+
+
+async def _event_language(event: Message | CallbackQuery, session: AsyncSession) -> str:
+    result = await session.execute(
+        select(User.language).where(User.telegram_id == event.from_user.id)
+    )
+    return normalize_language(result.scalar_one_or_none())
 
 
 async def _total_requests(
@@ -823,6 +854,172 @@ async def ai_triage(callback: CallbackQuery, session: AsyncSession):
 
 
 # Add worker
+
+def _schedule_action_keyboard(worker_id: int, language: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t("schedule_add_hours", language), callback_data=f"schedule_hours:{worker_id}")],
+        [InlineKeyboardButton(text=t("schedule_absence", language), callback_data=f"schedule_unavailable:{worker_id}"),
+         InlineKeyboardButton(text=t("schedule_extra_shift", language), callback_data=f"schedule_available:{worker_id}")],
+        [InlineKeyboardButton(text=t("schedule_clear", language), callback_data=f"schedule_clear:{worker_id}")],
+    ])
+
+
+@router.message(F.text.in_({"🗓 Графики исполнителей", "🗓 Орындаушылар кестесі"}))
+async def schedules_start(message: Message, session: AsyncSession):
+    if not await _require_dispatcher(message, session):
+        return
+    language = await _event_language(message, session)
+    result = await session.execute(
+        select(User).where(User.role == "worker", User.is_approved.is_(True)).order_by(User.full_name)
+    )
+    workers = list(result.scalars().all())
+    if not workers:
+        await message.answer(t("no_approved_workers", language))
+        return
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"{worker.full_name or worker.telegram_id} · {category_label(worker.worker_category, language)}",
+            callback_data=f"schedule_view:{worker.id}",
+        )]
+        for worker in workers
+    ])
+    await message.answer(
+        f"🗓 {t('worker_schedules', language)}\n{t('organization_timezone', language)}: "
+        f"{DISPLAY_TIMEZONE}\n\n{t('choose_worker', language)}",
+        reply_markup=keyboard,
+    )
+
+
+@router.callback_query(F.data.startswith("schedule_view:"))
+async def schedule_view(callback: CallbackQuery, session: AsyncSession):
+    if not await _require_dispatcher(callback, session):
+        return
+    worker_id = int(callback.data.split(":", 1)[1])
+    language = await _event_language(callback, session)
+    worker = await session.get(User, worker_id)
+    if worker is None or worker.role != "worker":
+        await callback.answer(t("worker_not_found", language), show_alert=True)
+        return
+    hours_result = await session.execute(
+        select(WorkerWorkingHour)
+        .where(WorkerWorkingHour.worker_id == worker_id)
+        .order_by(WorkerWorkingHour.weekday, WorkerWorkingHour.start_time)
+    )
+    hours = list(hours_result.scalars().all())
+    exception_result = await session.execute(
+        select(WorkerScheduleException)
+        .where(WorkerScheduleException.worker_id == worker_id)
+        .order_by(WorkerScheduleException.starts_at.desc())
+        .limit(5)
+    )
+    exceptions = list(exception_result.scalars().all())
+    lines = [f"🗓 <b>{escape(worker.full_name or str(worker.telegram_id))}</b>"]
+    lines.append(
+        f"{t('actually_on_shift', language)}: "
+        f"{t('yes', language) if worker.is_on_shift else t('no', language)}"
+    )
+    lines.append(f"\n<b>{t('recurring_hours', language)}</b>")
+    if hours:
+        lines.extend(
+            f"• {WEEKDAY_LABELS[item.weekday]} {item.start_time.strftime('%H:%M')}–{item.end_time.strftime('%H:%M')}"
+            for item in hours
+        )
+    else:
+        lines.append(t("schedule_not_set", language))
+    if exceptions:
+        lines.append(f"\n<b>{t('recent_schedule_exceptions', language)}</b>")
+        for item in exceptions:
+            kind = t("schedule_available", language) if item.is_available else t("schedule_unavailable", language)
+            lines.append(
+                f"• {format_local(item.starts_at, '%d.%m %H:%M')}–{format_local(item.ends_at, '%d.%m %H:%M')} "
+                f"{kind}{' · ' + escape(item.reason) if item.reason else ''}"
+            )
+    await callback.message.answer("\n".join(lines), reply_markup=_schedule_action_keyboard(worker_id, language))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("schedule_hours:"))
+async def schedule_hours_start(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    if not await _require_dispatcher(callback, session):
+        return
+    worker_id = int(callback.data.split(":", 1)[1])
+    language = await _event_language(callback, session)
+    await state.set_state(ScheduleStates.waiting_hours)
+    await state.update_data(schedule_worker_id=worker_id)
+    await callback.message.answer(
+        t("schedule_hours_prompt", language),
+        reply_markup=reply_cancel_keyboard(language),
+    )
+    await callback.answer()
+
+
+@router.message(ScheduleStates.waiting_hours)
+async def schedule_hours_save(message: Message, state: FSMContext, session: AsyncSession):
+    language = await _event_language(message, session)
+    try:
+        weekdays, starts, ends = parse_recurring_hours(message.text or "", language)
+    except ValueError as exc:
+        await message.answer(str(exc))
+        return
+    data = await state.get_data()
+    worker_id = int(data["schedule_worker_id"])
+    await add_recurring_hours(session, worker_id, weekdays, starts, ends)
+    await session.commit()
+    await state.clear()
+    await message.answer(t("schedule_hours_added", language))
+
+
+@router.callback_query(F.data.startswith("schedule_unavailable:") | F.data.startswith("schedule_available:"))
+async def schedule_exception_start(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    if not await _require_dispatcher(callback, session):
+        return
+    action, raw_id = callback.data.split(":", 1)
+    language = await _event_language(callback, session)
+    await state.set_state(ScheduleStates.waiting_exception_details)
+    await state.update_data(
+        schedule_worker_id=int(raw_id),
+        schedule_is_available=(action == "schedule_available"),
+    )
+    await callback.message.answer(
+        t("schedule_exception_prompt", language),
+        reply_markup=reply_cancel_keyboard(language),
+    )
+    await callback.answer()
+
+
+@router.message(ScheduleStates.waiting_exception_details)
+async def schedule_exception_save(message: Message, state: FSMContext, session: AsyncSession):
+    language = await _event_language(message, session)
+    try:
+        starts, ends, reason = parse_local_exception(message.text or "", language)
+    except ValueError as exc:
+        await message.answer(str(exc))
+        return
+    data = await state.get_data()
+    await add_local_exception(
+        session,
+        int(data["schedule_worker_id"]),
+        starts,
+        ends,
+        is_available=bool(data["schedule_is_available"]),
+        reason=reason,
+        language=language,
+    )
+    await session.commit()
+    await state.clear()
+    await message.answer(t("schedule_exception_added", language))
+
+
+@router.callback_query(F.data.startswith("schedule_clear:"))
+async def schedule_clear(callback: CallbackQuery, session: AsyncSession):
+    if not await _require_dispatcher(callback, session):
+        return
+    worker_id = int(callback.data.split(":", 1)[1])
+    language = await _event_language(callback, session)
+    await clear_recurring_hours(session, worker_id)
+    await session.commit()
+    await callback.answer(t("schedule_cleared", language), show_alert=True)
+
 
 @router.message(F.text.in_({"➕ Добавить исполнителя", "➕ Орындаушы қосу"}))
 async def add_worker_start(message: Message, state: FSMContext, session: AsyncSession):

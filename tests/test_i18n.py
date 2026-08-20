@@ -5,6 +5,7 @@ from sqlalchemy import select
 
 from bot.handlers.common import cmd_start, set_language
 from bot.i18n import category_label, t
+from bot.keyboards import reply_cancel_keyboard
 from bot.models import User
 from tests.conftest import make_callback, make_message
 
@@ -17,6 +18,18 @@ def test_kazakh_is_default_language():
     assert t("main_menu", None) == "Басты мәзір"
     assert category_label("security", "kk") == "🛡️ Күзет"
     assert t("main_menu", "ru") == "Главное меню"
+
+
+def test_schedule_messages_are_localized():
+    assert t("schedule_add_hours", "ru") == "➕ Добавить часы"
+    assert t("schedule_add_hours", "kk") == "➕ Жұмыс уақытын қосу"
+    assert t("schedule_hours_added", "ru") == "✅ Рабочие часы добавлены."
+    assert t("schedule_hours_added", "kk") == "✅ Жұмыс уақыты қосылды."
+
+
+def test_cancel_keyboard_follows_explicit_user_language():
+    assert reply_cancel_keyboard("ru").keyboard[0][0].text == "❌ Отмена"
+    assert reply_cancel_keyboard("kk").keyboard[0][0].text == "❌ Болдырмау"
 
 
 @pytest.mark.asyncio

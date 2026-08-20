@@ -106,6 +106,8 @@ async def test_classify_pins_manual_category():
     c._chat = fake_chat  # type: ignore
     res = await c.classify_and_enrich("не горит свет в подъезде", category="electrician")
     assert seen["payload"]["known_category"] == "electrician"
+    assert seen["payload"]["timezone"] == "Asia/Almaty"
+    assert seen["payload"]["current_time"].endswith("+05:00")
     assert res.category == "electrician"
     assert res.confidence == 1.0
 

@@ -24,6 +24,8 @@ from bot.constants import URGENCY_LABELS
 from bot.services.llm import get_llm
 from bot.states import WorkerCompletionStates
 from bot.timezone import format_local
+from bot.services.schedules import get_schedule_status
+from bot.i18n import t
 
 router = Router()
 
@@ -150,7 +152,10 @@ async def available_requests(message: Message, session: AsyncSession):
         await message.answer("Доступно только исполнителям.")
         return
     if not user.is_on_shift:
-        await message.answer("Сначала выйдите на смену: ▶️ На смену")
+        await message.answer(t("start_shift_first", user.language))
+        return
+    if not (await get_schedule_status(session, user)).planned:
+        await message.answer(t("not_scheduled_now", user.language))
         return
     text, kb = await build_worker_available(session, user, page=0)
     await message.answer(text, parse_mode="HTML", reply_markup=kb)

@@ -1,7 +1,7 @@
-from datetime import datetime
+from datetime import datetime, time
 from sqlalchemy import (
     String, Integer, BigInteger, Text, DateTime, Boolean, ForeignKey, func,
-    Index, CheckConstraint,
+    Index, CheckConstraint, Time, UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -41,6 +41,55 @@ class User(Base):
 
     requests: Mapped[list["Request"]] = relationship("Request", back_populates="resident", foreign_keys="Request.resident_id")
     assigned_requests: Mapped[list["Request"]] = relationship("Request", back_populates="worker", foreign_keys="Request.worker_id")
+    working_hours: Mapped[list["WorkerWorkingHour"]] = relationship(
+        "WorkerWorkingHour", back_populates="worker", cascade="all, delete-orphan"
+    )
+    schedule_exceptions: Mapped[list["WorkerScheduleException"]] = relationship(
+        "WorkerScheduleException", back_populates="worker", cascade="all, delete-orphan"
+    )
+
+
+class WorkerWorkingHour(Base):
+    """One recurring local-time interval in a worker's official schedule."""
+
+    __tablename__ = "worker_working_hours"
+    __table_args__ = (
+        CheckConstraint("weekday BETWEEN 0 AND 6", name="ck_working_hours_weekday"),
+        UniqueConstraint(
+            "worker_id", "weekday", "start_time", "end_time",
+            name="uq_worker_working_interval",
+        ),
+        Index("ix_working_hours_worker_weekday", "worker_id", "weekday"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    worker_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    weekday: Mapped[int] = mapped_column(Integer, nullable=False)  # Monday = 0
+    start_time: Mapped[time] = mapped_column(Time, nullable=False)
+    end_time: Mapped[time] = mapped_column(Time, nullable=False)
+    timezone: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    worker: Mapped["User"] = relationship("User", back_populates="working_hours")
+
+
+class WorkerScheduleException(Base):
+    """A concrete UTC interval overriding a worker's recurring schedule."""
+
+    __tablename__ = "worker_schedule_exceptions"
+    __table_args__ = (
+        CheckConstraint("ends_at > starts_at", name="ck_schedule_exception_interval"),
+        Index("ix_schedule_exception_worker_interval", "worker_id", "starts_at", "ends_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    worker_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    is_available: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    worker: Mapped["User"] = relationship("User", back_populates="schedule_exceptions")
 
 
 class Request(Base):

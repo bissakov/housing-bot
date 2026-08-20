@@ -1,9 +1,11 @@
-from datetime import datetime, timezone
 from sqlalchemy import select, update, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from bot.models import Request, RequestEvent, User, Announcement
 from bot.auth import is_administrator, is_dispatcher
 from bot.constants import REQUEST_CATEGORIES, URGENCY_LEVELS
+from bot.timezone import utc_now
+from bot.services.schedules import is_worker_available
+from bot.i18n import t
 
 
 def _event(
@@ -49,11 +51,13 @@ async def claim_request(session: AsyncSession, request_id: int, worker: User) ->
         return False, "Категория заявки не совпадает с вашей специализацией"
     if not worker.is_on_shift:
         return False, "Вы не на смене"
+    if not await is_worker_available(session, worker):
+        return False, t("not_scheduled_claim", worker.language)
 
     upd = await session.execute(
         update(Request)
         .where(Request.id == request_id, Request.status == "new")
-        .values(status="accepted", worker_id=worker.id, accepted_at=datetime.now(timezone.utc))
+        .values(status="accepted", worker_id=worker.id, accepted_at=utc_now())
     )
     if upd.rowcount == 0:
         return False, "Заявка уже принята другим исполнителем"
@@ -93,7 +97,7 @@ async def close_request(
     upd = await session.execute(
         update(Request).where(*conditions).values(
             status="closed",
-            closed_at=datetime.now(timezone.utc),
+            closed_at=utc_now(),
             completion_result=completion_result,
             completion_comment=(completion_comment or "").strip() or None,
             completion_raw_comment=(completion_raw_comment or "").strip() or None,
@@ -137,7 +141,7 @@ async def assign_request(
         update(Request).where(*conditions).values(
             worker_id=worker.id,
             status="accepted",
-            accepted_at=datetime.now(timezone.utc),
+            accepted_at=utc_now(),
         )
     )
     if upd.rowcount != 1:

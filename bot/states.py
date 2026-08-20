@@ -28,3 +28,10 @@ class AnnouncementStates(StatesGroup):
 class AddWorkerStates(StatesGroup):
     waiting_telegram_id = State()
     waiting_category = State()
+
+
+class ScheduleStates(StatesGroup):
+    waiting_worker = State()
+    waiting_hours = State()
+    waiting_exception = State()
+    waiting_exception_details = State()

@@ -58,16 +58,16 @@ def dispatcher_menu(language: str = DEFAULT_LANGUAGE) -> ReplyKeyboardMarkup:
     language = normalize_language(language)
     b = ReplyKeyboardBuilder()
     labels = {
-        "kk": ("📊 Жиынтық", "📋 Барлық өтінімдер", "⏳ Растауға", "➕ Орындаушы қосу", "📢 Хабарландыру жасау", "📢 Хабарландырулар", "Диспетчер тақтасы"),
-        "ru": ("📊 Сводка", "📋 Все заявки", "⏳ На подтверждение", "➕ Добавить исполнителя", "📢 Создать объявление", "📢 Объявления", "Панель диспетчера"),
+        "kk": ("📊 Жиынтық", "📋 Барлық өтінімдер", "⏳ Растауға", "➕ Орындаушы қосу", "🗓 Орындаушылар кестесі", "📢 Хабарландыру жасау", "📢 Хабарландырулар", "Диспетчер тақтасы"),
+        "ru": ("📊 Сводка", "📋 Все заявки", "⏳ На подтверждение", "➕ Добавить исполнителя", "🗓 Графики исполнителей", "📢 Создать объявление", "📢 Объявления", "Панель диспетчера"),
     }[language]
-    for label in labels[:6]:
+    for label in labels[:7]:
         b.button(text=label)
     b.adjust(2, 2, 2)
     return b.as_markup(
         resize_keyboard=True,
         is_persistent=True,
-        input_field_placeholder=labels[6],
+        input_field_placeholder=labels[7],
     )
 
 

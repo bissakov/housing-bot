@@ -35,11 +35,11 @@ async def resident_cancel_cb(callback: CallbackQuery, state: FSMContext, session
     u = res.scalar_one_or_none()
     kb = get_main_keyboard(u) if u and u.is_approved else None
     try:
-        await callback.message.edit_text("❌ Отмена")
+        await callback.message.edit_text(t("cancel", u.language if u else None))
     except Exception:
         pass
     if kb:
-        await callback.message.answer("Главное меню", reply_markup=kb)
+        await callback.message.answer(t("main_menu", u.language), reply_markup=kb)
     await callback.answer()
 
 @router.message(F.text.in_({"❌ Отмена", "❌ Болдырмау"}))
@@ -52,7 +52,7 @@ async def resident_cancel_text(message: Message, state: FSMContext, session: Asy
     res = await session.execute(_sel(User).where(User.telegram_id == message.from_user.id))
     u = res.scalar_one_or_none()
     kb = get_main_keyboard(u) if u and u.is_approved else None
-    await message.answer("❌ Отменено.", reply_markup=kb)
+    await message.answer(t("cancelled", u.language if u else None), reply_markup=kb)
 
 def _is_resident(user: User) -> bool:
     from bot.config import ADMIN_IDS
@@ -247,7 +247,9 @@ async def _notify_new_request(bot: Bot, session: AsyncSession, req: Request, use
         f"Описание: {escape(description[:500])}\n\n"
         f"Нажмите «📋 Доступные заявки» чтобы принять."
     )
-    report = await notify_workers(bot, session, category, notify_text)
+    report = await notify_workers(
+        bot, session, category, notify_text, urgency=req.urgency
+    )
     if report.delivered == 0:
         await notify_dispatchers(
             bot,

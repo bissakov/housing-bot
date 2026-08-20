@@ -9,6 +9,16 @@ from bot.config import DISPLAY_TIMEZONE
 _display_timezone = ZoneInfo(DISPLAY_TIMEZONE)
 
 
+def utc_now() -> datetime:
+    """Return the current instant in UTC from the application's central clock."""
+    return datetime.now(timezone.utc)
+
+
+def local_now() -> datetime:
+    """Return the current instant in the configured display timezone."""
+    return utc_now().astimezone(_display_timezone)
+
+
 def localize(value: datetime) -> datetime:
     """Convert a stored UTC timestamp to the configured display timezone.
 

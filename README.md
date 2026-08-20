@@ -127,6 +127,20 @@ in-progress registration and request forms survive bot restarts. Without a
 - **Dispatcher**: 📋 Все заявки (пагинация) -> Назначить/Переназначить -> ➕ Добавить исполнителя -> 📢 Создать объявление (broadcast)
 - **Administrator**: all dispatcher access plus authorized destructive actions, including deleting any request or announcement; `ADMIN_IDS` users are bootstrapped into this role
 
+## Worker schedules and current time
+
+- A dispatcher or administrator opens **🗓 Графики исполнителей** and adds
+  recurring hours such as `1-5 09:00-18:00` (Monday through Friday).
+- The same screen records one-off absences and additional shifts. Input uses
+  `DISPLAY_TIMEZONE`; concrete exceptions are stored in UTC.
+- A worker must both be scheduled and mark an actual shift start to receive or
+  claim normal requests. Workers without configured hours retain the previous
+  check-in-only behavior, allowing schedules to be introduced gradually.
+- Urgent requests fall back first to scheduled workers who have not checked in,
+  then to all approved specialists in the category.
+- Every LLM call receives the current local ISO timestamp and timezone, so
+  relative dates never depend on a stale model clock.
+
 ## Atomic claim
 
 `UPDATE requests SET status='accepted' WHERE id=:id AND status='new'` - prevents race.

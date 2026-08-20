@@ -5,7 +5,7 @@ from sqlalchemy import select
 
 from bot.handlers.common import cmd_start, set_language
 from bot.i18n import SUPPORTED_LANGUAGES, TEXTS, category_label, normalize_language, t, text_variants
-from bot.keyboards import dispatcher_menu, resident_menu, worker_menu
+from bot.keyboards import cancel_keyboard, dispatcher_menu, resident_menu, worker_menu
 from bot.keyboards import reply_cancel_keyboard
 from bot.models import User
 from tests.conftest import make_callback, make_message
@@ -44,7 +44,7 @@ def test_each_menu_uses_only_the_requested_language():
     assert "📝 Создать заявку" not in resident_texts
     assert "▶️ На смену" in worker_texts
     assert "▶️ Ауысымға шығу" not in worker_texts
-    assert "📊 Жиынтық" in dispatcher_texts
+    assert "📊 Есептер" in dispatcher_texts
     assert "📊 Сводка" not in dispatcher_texts
 
 
@@ -58,6 +58,8 @@ def test_schedule_messages_are_localized():
 def test_cancel_keyboard_follows_explicit_user_language():
     assert reply_cancel_keyboard("ru").keyboard[0][0].text == "❌ Отмена"
     assert reply_cancel_keyboard("kk").keyboard[0][0].text == "❌ Болдырмау"
+    assert cancel_keyboard("ru").inline_keyboard[0][0].text == "❌ Отмена"
+    assert cancel_keyboard("kk").inline_keyboard[0][0].text == "❌ Болдырмау"
 
 
 @pytest.mark.asyncio

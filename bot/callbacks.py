@@ -35,3 +35,17 @@ class DispatcherFilteredRequestCallback(CallbackData, prefix="req_fview"):
     page: int = 0
     status: str = "all"
     category: str = "all"
+
+
+class ReportCallback(CallbackData, prefix="rp"):
+    """Compact report navigation and filter state."""
+
+    action: str = "o"
+    period: str = "7"
+    category: str = "a"
+    urgency: str = "a"
+    worker_id: int = 0
+    result: str = "a"
+    escalation: str = "a"
+    start_day: int = 0
+    end_day: int = 0

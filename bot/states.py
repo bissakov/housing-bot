@@ -36,3 +36,8 @@ class ScheduleStates(StatesGroup):
     waiting_hours = State()
     waiting_exception = State()
     waiting_exception_details = State()
+
+
+class ReportDateStates(StatesGroup):
+    waiting_start = State()
+    waiting_end = State()

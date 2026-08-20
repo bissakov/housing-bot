@@ -47,7 +47,7 @@ async def escalate_overdue_requests(
                 Request.status == "new",
                 Request.is_escalated.is_(False),
             )
-            .values(is_escalated=True)
+            .values(is_escalated=True, escalated_at=utc_now())
         )
         if claimed.rowcount != 1:
             continue

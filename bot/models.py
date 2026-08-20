@@ -134,6 +134,7 @@ class Request(Base):
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_escalated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    escalated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # LLM enrichment (nullable for backward compat)
     urgency: Mapped[str | None] = mapped_column(String(10), nullable=True)
     raw_description: Mapped[str | None] = mapped_column(Text, nullable=True)

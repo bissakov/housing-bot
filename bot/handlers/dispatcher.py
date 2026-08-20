@@ -5,11 +5,12 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from html import escape
+from datetime import date, datetime
 import logging
 
 from bot.models import User, Request, RequestEvent, WorkerWorkingHour, WorkerScheduleException
 from bot.constants import URGENCY_LABELS, REQUEST_CATEGORIES
-from bot.states import AnnouncementStates, AddWorkerStates, ScheduleStates
+from bot.states import AnnouncementStates, AddWorkerStates, ReportDateStates, ScheduleStates
 from bot.keyboards import (
     CATEGORY_LABELS, STATUS_LABELS,
     dispatcher_request_keyboard, assign_worker_keyboard, category_keyboard, approval_keyboard, cancel_keyboard, reply_cancel_keyboard
@@ -30,6 +31,17 @@ from bot.callbacks import (
     DispatcherRequestCallback,
     DispatcherHistoryCallback,
     DispatcherFilteredRequestCallback,
+    ReportCallback,
+)
+from bot.services.reports import (
+    ReportFilters,
+    build_breakdown,
+    build_dynamics,
+    build_filter_screen,
+    build_overview,
+    choice_keyboard,
+    export_csv,
+    worker_choices,
 )
 from bot.timezone import format_local
 from bot.config import DISPLAY_TIMEZONE
@@ -294,16 +306,6 @@ async def build_request_detail(
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def _dispatcher_counts(session: AsyncSession) -> tuple[dict[str, int], dict[str, int]]:
-    status_result = await session.execute(
-        select(Request.status, func.count(Request.id)).group_by(Request.status)
-    )
-    category_result = await session.execute(
-        select(Request.category, func.count(Request.id)).group_by(Request.category)
-    )
-    return dict(status_result.all()), dict(category_result.all())
-
-
 @router.message(F.text.in_(text_variants("summary")))
 async def dispatcher_summary(message: Message, session: AsyncSession):
     result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
@@ -312,35 +314,125 @@ async def dispatcher_summary(message: Message, session: AsyncSession):
         await message.answer("Только для диспетчеров.")
         return
 
-    statuses, categories = await _dispatcher_counts(session)
-    workers_result = await session.execute(
-        select(func.count()).select_from(User).where(
-            User.role == "worker", User.is_approved.is_(True), User.is_on_shift.is_(True)
-        )
+    text, keyboard = await build_overview(session, ReportFilters())
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+def _report_filters(callback_data: ReportCallback) -> ReportFilters:
+    def decode(mapping: dict[str, str], value: str) -> str:
+        return next((key for key, code in mapping.items() if code == value), value)
+
+    return ReportFilters(
+        period=decode({"today": "t", "yesterday": "y", "7d": "7", "30d": "30", "month": "m", "prev_month": "pm", "custom": "c"}, callback_data.period),
+        category=decode({"all": "a", "electrician": "e", "plumber": "p", "security": "s"}, callback_data.category),
+        urgency=decode({"all": "a", "high": "h", "normal": "n", "low": "l", "none": "x"}, callback_data.urgency),
+        worker_id=callback_data.worker_id,
+        result=decode({"all": "a", "done": "d", "not_done": "n", "none": "x"}, callback_data.result),
+        escalation=decode({"all": "a", "yes": "y", "no": "n"}, callback_data.escalation),
+        custom_start=date.fromordinal(callback_data.start_day) if callback_data.start_day else None,
+        custom_end=date.fromordinal(callback_data.end_day) if callback_data.end_day else None,
     )
-    on_shift = workers_result.scalar() or 0
-    active = statuses.get("new", 0) + statuses.get("accepted", 0)
-    lines = [
-        "📊 <b>Сводка по дому</b>",
-        "",
-        f"🚨 Активных: <b>{active}</b>",
-        f"🆕 Новых: <b>{statuses.get('new', 0)}</b>",
-        f"🔧 В работе: <b>{statuses.get('accepted', 0)}</b>",
-        f"✅ Закрытых: <b>{statuses.get('closed', 0)}</b>",
-        f"🟢 Исполнителей на смене: <b>{on_shift}</b>",
-        "",
-        "<b>По категориям</b>",
-    ]
-    for code, label in CATEGORY_LABELS.items():
-        lines.append(f"{label}: {categories.get(code, 0)}")
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 Открыть все заявки", callback_data="disp_filter:0:all:all")],
-        [
-            InlineKeyboardButton(text="🆕 Новые", callback_data="disp_filter:0:new:all"),
-            InlineKeyboardButton(text="🔧 В работе", callback_data="disp_filter:0:accepted:all"),
-        ],
-    ])
-    await message.answer("\n".join(lines), parse_mode="HTML", reply_markup=kb)
+
+
+async def _edit_report(callback: CallbackQuery, text: str, keyboard: InlineKeyboardMarkup) -> None:
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except Exception as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
+
+
+@router.callback_query(ReportCallback.filter())
+async def dispatcher_report_callback(
+    callback: CallbackQuery,
+    callback_data: ReportCallback,
+    session: AsyncSession,
+    state: FSMContext,
+):
+    user = await session.scalar(select(User).where(User.telegram_id == callback.from_user.id))
+    if not is_dispatcher(user):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    filters = _report_filters(callback_data)
+    action = callback_data.action
+    if action == "p":
+        if filters.period == "custom":
+            await state.set_state(ReportDateStates.waiting_start)
+            await callback.message.answer(
+                "📅 Введите начало периода в формате <b>ДД.ММ.ГГГГ</b>\nНапример: 01.03.2026",
+                parse_mode="HTML",
+                reply_markup=cancel_keyboard(user.language),
+            )
+            await callback.answer()
+            return
+        action = "o"
+    if action == "x":
+        await callback.message.answer_document(await export_csv(session, filters), caption="Отчёт готов")
+        await callback.answer()
+        return
+    if action == "f":
+        text, keyboard = await build_filter_screen(session, filters)
+    elif action in {"c", "w"}:
+        text, keyboard = await build_breakdown(session, filters, "workers" if action == "w" else "categories")
+    elif action == "d":
+        text, keyboard = await build_dynamics(session, filters)
+    elif action == "fc":
+        choices = [("Все категории", "all"), *[(CATEGORY_LABELS[c], c) for c in REQUEST_CATEGORIES]]
+        text, keyboard = "🗂 <b>Выберите категорию</b>", choice_keyboard(filters, "category", choices)
+    elif action == "fu":
+        choices = [("Все приоритеты", "all"), ("Высокий", "high"), ("Обычный", "normal"), ("Низкий", "low"), ("Не определён", "none")]
+        text, keyboard = "🔥 <b>Выберите приоритет</b>", choice_keyboard(filters, "urgency", choices)
+    elif action == "fw":
+        text, keyboard = "👷 <b>Выберите исполнителя</b>", choice_keyboard(filters, "worker_id", await worker_choices(session))
+    elif action == "fr":
+        choices = [("Любой результат", "all"), ("Выполнено", "done"), ("Не выполнено", "not_done"), ("Без результата", "none")]
+        text, keyboard = "🎯 <b>Выберите результат</b>", choice_keyboard(filters, "result", choices)
+    elif action == "fe":
+        choices = [("Любая", "all"), ("Эскалированные", "yes"), ("Без эскалации", "no")]
+        text, keyboard = "🚨 <b>Выберите эскалацию</b>", choice_keyboard(filters, "escalation", choices)
+    else:
+        text, keyboard = await build_overview(session, filters)
+    await _edit_report(callback, text, keyboard)
+    await callback.answer()
+
+
+def _parse_report_date(value: str) -> date | None:
+    try:
+        return datetime.strptime(value.strip(), "%d.%m.%Y").date()
+    except ValueError:
+        return None
+
+
+@router.message(ReportDateStates.waiting_start)
+async def report_custom_start(message: Message, state: FSMContext):
+    start = _parse_report_date(message.text or "")
+    if not start:
+        await message.answer("Не удалось распознать дату. Введите её как ДД.ММ.ГГГГ.")
+        return
+    await state.update_data(report_start=start.isoformat())
+    await state.set_state(ReportDateStates.waiting_end)
+    await message.answer("Введите конец периода в формате <b>ДД.ММ.ГГГГ</b>.", parse_mode="HTML")
+
+
+@router.message(ReportDateStates.waiting_end)
+async def report_custom_end(message: Message, session: AsyncSession, state: FSMContext):
+    end = _parse_report_date(message.text or "")
+    data = await state.get_data()
+    start = date.fromisoformat(data["report_start"])
+    if not end:
+        await message.answer("Не удалось распознать дату. Введите её как ДД.ММ.ГГГГ.")
+        return
+    if end < start:
+        await message.answer("Конец периода не может быть раньше начала.")
+        return
+    if (end - start).days > 730:
+        await message.answer("Период не может превышать два года.")
+        return
+    await state.clear()
+    text, keyboard = await build_overview(
+        session, ReportFilters(period="custom", custom_start=start, custom_end=end)
+    )
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
 
 
 @router.message(F.text.in_(text_variants("all_requests")))

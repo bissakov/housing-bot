@@ -182,9 +182,10 @@ def assign_worker_keyboard(request_id: int, workers: list) -> InlineKeyboardMark
     return b.as_markup()
 
 
-def cancel_keyboard() -> InlineKeyboardMarkup:
+def cancel_keyboard(language: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
+    language = normalize_language(language)
     b = InlineKeyboardBuilder()
-    b.button(text="❌ Отмена", callback_data="cancel_fsm")
+    b.button(text=t("cancel", language), callback_data="cancel_fsm")
     return b.as_markup()
 
 def reply_cancel_keyboard(language: str = DEFAULT_LANGUAGE) -> ReplyKeyboardMarkup:

@@ -2,6 +2,7 @@ import pytest
 from unittest.mock import AsyncMock, patch
 from sqlalchemy import select
 from bot.models import Request, Announcement
+from bot.keyboards import dispatcher_request_keyboard
 from bot.services.requests import delete_request, delete_announcement
 from tests.conftest import create_user, make_callback, make_message
 
@@ -30,9 +31,9 @@ async def test_resident_cannot_delete_accepted(session):
     assert "только новую" in msg.lower()
 
 @pytest.mark.asyncio
-async def test_dispatcher_can_delete_any(session):
+async def test_administrator_can_delete_any(session):
     resident = await create_user(session, telegram_id=111, role="resident")
-    disp = await create_user(session, telegram_id=222, role="dispatcher", is_approved=True)
+    disp = await create_user(session, telegram_id=222, role="administrator", is_approved=True)
     worker = await create_user(session, telegram_id=333, role="worker", worker_category="plumber", is_on_shift=True)
     from bot.services.requests import create_request, claim_request
     req = await create_request(session, resident_id=resident.id, category="plumber", description="Течет")
@@ -43,8 +44,45 @@ async def test_dispatcher_can_delete_any(session):
     assert ok
 
 @pytest.mark.asyncio
-async def test_dispatcher_can_delete_announcement(session):
-    disp = await create_user(session, telegram_id=111, role="dispatcher", is_approved=True)
+async def test_dispatcher_cannot_delete_requests(session):
+    resident = await create_user(session, telegram_id=111, role="resident")
+    dispatcher = await create_user(
+        session, telegram_id=222, role="dispatcher", is_approved=True
+    )
+    from bot.services.requests import create_request
+    req = await create_request(
+        session,
+        resident_id=resident.id,
+        category="plumber",
+        description="Течет",
+    )
+    await session.flush()
+
+    ok, msg = await delete_request(session, req.id, dispatcher)
+
+    assert not ok
+    assert "прав" in msg.lower()
+
+def test_delete_button_is_only_rendered_for_administrators():
+    dispatcher_keyboard = dispatcher_request_keyboard(1, "new")
+    administrator_keyboard = dispatcher_request_keyboard(1, "new", can_delete=True)
+
+    dispatcher_callbacks = {
+        button.callback_data
+        for row in dispatcher_keyboard.inline_keyboard
+        for button in row
+    }
+    administrator_callbacks = {
+        button.callback_data
+        for row in administrator_keyboard.inline_keyboard
+        for button in row
+    }
+    assert "delete_req:1" not in dispatcher_callbacks
+    assert "delete_req:1" in administrator_callbacks
+
+@pytest.mark.asyncio
+async def test_administrator_can_delete_announcement(session):
+    disp = await create_user(session, telegram_id=111, role="administrator", is_approved=True)
     from bot.services.requests import create_announcement
     ann = await create_announcement(session, author_id=disp.id, text="Вода отключена")
     await session.flush()
@@ -62,7 +100,23 @@ async def test_resident_cannot_delete_announcement(session):
     await session.flush()
     ok, msg = await delete_announcement(session, ann.id, resident)
     assert not ok
-    assert "диспетчер" in msg.lower()
+    assert "администратор" in msg.lower()
+
+@pytest.mark.asyncio
+async def test_dispatcher_cannot_delete_announcement(session):
+    dispatcher = await create_user(
+        session, telegram_id=111, role="dispatcher", is_approved=True
+    )
+    from bot.services.requests import create_announcement
+    ann = await create_announcement(
+        session, author_id=dispatcher.id, text="Вода отключена"
+    )
+    await session.flush()
+
+    ok, msg = await delete_announcement(session, ann.id, dispatcher)
+
+    assert not ok
+    assert "администратор" in msg.lower()
 
 @pytest.mark.asyncio
 async def test_delete_via_callback_confirm_flow(session, fake_bot):

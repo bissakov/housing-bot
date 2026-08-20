@@ -22,6 +22,7 @@ ROLE_OPTIONS = [
     ("worker:plumber", "🚿 Сантехник"),
     ("worker:security", "🛡️ Охрана"),
     ("dispatcher", "🎛️ Диспетчер"),
+    ("administrator", "🛡️ Администратор"),
 ]
 
 def dev_keyboard(current: str) -> InlineKeyboardMarkup:
@@ -95,8 +96,8 @@ async def dev_switch(callback: CallbackQuery, session: AsyncSession, bot: Bot):
             user.full_name = tg_name if tg_name and tg_name.lower() != "admin" else "DEV Житель"
         if not user.apartment:
             user.apartment = "1"
-    elif choice == "dispatcher":
-        user.role = "dispatcher"
+    elif choice in {"dispatcher", "administrator"}:
+        user.role = choice
         user.worker_category = None
         user.is_approved = True
         user.is_on_shift = False
@@ -104,7 +105,12 @@ async def dev_switch(callback: CallbackQuery, session: AsyncSession, bot: Bot):
     await session.commit()
 
     kb = get_main_keyboard(user)
-    role_label = {"resident": "Житель", "worker": "Исполнитель", "dispatcher": "Диспетчер"}.get(user.role, user.role)
+    role_label = {
+        "resident": "Житель",
+        "worker": "Исполнитель",
+        "dispatcher": "Диспетчер",
+        "administrator": "Администратор",
+    }.get(user.role, user.role)
     extra = f" ({user.worker_category})" if user.role == "worker" else ""
     await callback.message.edit_text(f"✅ Роль → <b>{role_label}{extra}</b>\nМеню обновлено.", parse_mode="HTML")
     await callback.message.answer(f"Главное меню | Роль: {role_label}{extra}", reply_markup=kb)

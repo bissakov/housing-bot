@@ -17,7 +17,7 @@ from bot.keyboards import (
 from bot.services.requests import assign_request, create_announcement
 from bot.services.llm import get_llm
 from bot.services.notify import broadcast_announcement
-from bot.auth import is_dispatcher
+from bot.auth import is_administrator, is_dispatcher
 from bot.callbacks import (
     DispatcherRequestCallback,
     DispatcherHistoryCallback,
@@ -197,7 +197,13 @@ async def build_dispatcher_list(
     return text, InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
 
-async def build_request_detail(session: AsyncSession, request_id: int, page: int) -> tuple[str, InlineKeyboardMarkup]:
+async def build_request_detail(
+    session: AsyncSession,
+    request_id: int,
+    page: int,
+    *,
+    can_delete: bool = False,
+) -> tuple[str, InlineKeyboardMarkup]:
     q = await session.execute(select(Request).where(Request.id == request_id))
     req = q.scalar_one_or_none()
     if not req:
@@ -234,7 +240,11 @@ async def build_request_detail(session: AsyncSession, request_id: int, page: int
             f"{escape(req.completion_comment or '—')}"
         )
     # Start from existing dispatcher_request_keyboard but add back button
-    base_kb = dispatcher_request_keyboard(req.id, req.status)
+    base_kb = dispatcher_request_keyboard(
+        req.id,
+        req.status,
+        can_delete=can_delete,
+    )
     # base_kb has rows of 1 button each (or 2), we keep them
     rows = [list(row) for row in base_kb.inline_keyboard]
     # insert ✨ row after action rows, before back
@@ -374,7 +384,12 @@ async def req_view(
     if not user or not _is_dispatcher(user):
         await callback.answer("Нет прав", show_alert=True)
         return
-    text, kb = await build_request_detail(session, req_id, page)
+    text, kb = await build_request_detail(
+        session,
+        req_id,
+        page,
+        can_delete=is_administrator(user),
+    )
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
     await callback.answer()
 
@@ -391,7 +406,10 @@ async def filtered_req_view(
         await callback.answer("Нет прав", show_alert=True)
         return
     text, kb = await build_request_detail(
-        session, callback_data.request_id, callback_data.page
+        session,
+        callback_data.request_id,
+        callback_data.page,
+        can_delete=is_administrator(user),
     )
     rows = [list(row) for row in kb.inline_keyboard]
     rows[-1] = [InlineKeyboardButton(

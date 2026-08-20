@@ -109,13 +109,19 @@ def request_close_keyboard(request_id: int) -> InlineKeyboardMarkup:
     return b.as_markup()
 
 
-def dispatcher_request_keyboard(request_id: int, status: str) -> InlineKeyboardMarkup:
+def dispatcher_request_keyboard(
+    request_id: int,
+    status: str,
+    *,
+    can_delete: bool = False,
+) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     if status == "new":
         b.button(text="👤 Назначить", callback_data=f"assign:{request_id}")
     elif status == "accepted":
         b.button(text="🔄 Переназначить", callback_data=f"reassign:{request_id}")
-    b.button(text="🗑️ Удалить", callback_data=f"delete_req:{request_id}")
+    if can_delete:
+        b.button(text="🗑️ Удалить", callback_data=f"delete_req:{request_id}")
     b.adjust(1)
     return b.as_markup()
 

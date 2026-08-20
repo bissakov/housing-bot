@@ -2,7 +2,7 @@
 
 REQUEST_CATEGORIES = frozenset({"electrician", "plumber", "security"})
 REQUEST_STATUSES = frozenset({"new", "accepted", "closed"})
-USER_ROLES = frozenset({"resident", "worker", "dispatcher"})
+USER_ROLES = frozenset({"resident", "worker", "dispatcher", "administrator"})
 URGENCY_LEVELS = frozenset({"low", "normal", "high"})
 
 CATEGORY_LABELS = {

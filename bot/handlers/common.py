@@ -8,6 +8,7 @@ from html import escape
 import logging
 
 from bot.models import User
+from bot.auth import is_administrator, is_dispatcher
 from bot.config import ADMIN_IDS
 from bot.constants import CATEGORY_LABELS, REQUEST_CATEGORIES
 from bot.states import RegistrationStates
@@ -21,12 +22,7 @@ logger = logging.getLogger(__name__)
 PAGE_SIZE = 5
 
 def get_main_keyboard(user: User):
-    from bot.config import is_admin as _is_admin
-    if _is_admin(user.telegram_id) and user.role == "dispatcher":
-        return dispatcher_menu(user.language)
-    if user.telegram_id in ADMIN_IDS and not __import__("bot.config", fromlist=["DEV_MODE"]).DEV_MODE:
-        return dispatcher_menu(user.language)
-    if user.role == "dispatcher":
+    if is_dispatcher(user):
         return dispatcher_menu(user.language)
     if user.role == "worker":
         return worker_menu(user.is_on_shift, user.language)
@@ -34,8 +30,7 @@ def get_main_keyboard(user: User):
 
 
 def _is_dispatcher(user: User) -> bool:
-    from bot.config import is_admin as _is_admin  # is_admin-gated
-    return user.role == "dispatcher" or (not __import__("bot.config", fromlist=["DEV_MODE"]).DEV_MODE and user.telegram_id in ADMIN_IDS) or _is_admin(user.telegram_id) and user.role == "dispatcher"
+    return is_dispatcher(user)
 
 
 @router.callback_query(F.data == "cancel_fsm")
@@ -65,9 +60,13 @@ async def ensure_user(message: Message, session: AsyncSession) -> User:  # type:
     result = await session.execute(select(User).where(User.telegram_id == tid))
     user = result.scalar_one_or_none()
     if user:
+        if tid in ADMIN_IDS and user.role != "administrator":
+            user.role = "administrator"
+            user.is_approved = True
+            await session.flush()
         return user
     is_admin = tid in ADMIN_IDS
-    role = "dispatcher" if is_admin else "resident"
+    role = "administrator" if is_admin else "resident"
     user = User(telegram_id=tid, role=role, is_approved=is_admin)
     session.add(user)
     await session.flush()
@@ -79,11 +78,6 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
     await state.clear()
     user = await ensure_user(message, session)
     await session.commit()
-
-    if user.telegram_id in ADMIN_IDS and user.role != "dispatcher":
-        user.role = "dispatcher"
-        user.is_approved = True
-        await session.commit()
 
     if user.language is None:
         await state.set_state(RegistrationStates.waiting_language)
@@ -378,7 +372,7 @@ async def build_announcement_detail(session: AsyncSession, ann_id: int, page: in
         return t("not_found_announcement", viewer.language), InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=t("back", viewer.language), callback_data=f"ann_list:{page}")]])
     text = f"📢 <b>{t('announcement', viewer.language)} #{ann.id}</b>\n{ann.created_at.strftime('%d.%m %H:%M') if ann.created_at else ''}\n\n{escape(ann.text)}"
     rows: list[list[InlineKeyboardButton]] = []
-    if _is_dispatcher(viewer):
+    if is_administrator(viewer):
         rows.append([InlineKeyboardButton(text="🗑️ Удалить это объявление", callback_data=f"delete_ann:{ann.id}")])
     rows.append([InlineKeyboardButton(text=t("back_to_list", viewer.language), callback_data=f"ann_list:{page}")])
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
@@ -437,18 +431,14 @@ async def confirm_delete_req(callback: CallbackQuery, session: AsyncSession):
     if not req:
         await callback.answer("Заявка не найдена", show_alert=True)
         return
-    # RBAC: resident own-new only, worker none, dispatcher any
+    # RBAC: resident own-new only, worker/dispatcher none, administrator any.
     res_u = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
     actor = res_u.scalar_one_or_none()
     if not actor:
         await callback.answer("Ошибка", show_alert=True)
         return
-    from bot.services.requests import delete_request as _del_check
-    # peek check without executing delete: mimic delete_request logic
-    from bot.config import is_admin as _is_admin_chk
-    is_disp = actor.role == "dispatcher" or (_is_admin_chk(actor.telegram_id) and actor.role == "dispatcher") or (not __import__("bot.config", fromlist=["DEV_MODE"]).DEV_MODE and actor.telegram_id in ADMIN_IDS)
     is_owner = req.resident_id == actor.id
-    allowed = is_disp or (is_owner and req.status == "new")
+    allowed = is_administrator(actor) or (is_owner and req.status == "new")
     if not allowed:
         await callback.answer("⛔ Недостаточно прав для удаления", show_alert=True)
         return
@@ -458,12 +448,11 @@ async def confirm_delete_req(callback: CallbackQuery, session: AsyncSession):
 
 @router.callback_query(F.data.startswith("delete_ann:"))
 async def confirm_delete_ann(callback: CallbackQuery, session: AsyncSession):  # RBAC ann
-    from bot.config import is_admin as _is_admin_a2
     ann_id = int(callback.data.split(":")[1])
     res_u2 = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
     actor2 = res_u2.scalar_one_or_none()
-    if not actor2 or not (actor2.role == "dispatcher" or (_is_admin_a2(actor2.telegram_id) and actor2.role == "dispatcher") or (not __import__("bot.config", fromlist=["DEV_MODE"]).DEV_MODE and actor2.telegram_id in ADMIN_IDS)):
-        await callback.answer("⛔ Только диспетчер может удалить объявление", show_alert=True)
+    if not is_administrator(actor2):
+        await callback.answer("⛔ Только администратор может удалить объявление", show_alert=True)
         return
     await callback.message.edit_reply_markup(reply_markup=confirm_delete_keyboard("ann", ann_id))
     await callback.answer("Подтвердите удаление")

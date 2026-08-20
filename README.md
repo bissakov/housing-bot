@@ -23,7 +23,7 @@ cp .env.example .env
 
 ```
 BOT_TOKEN=123:ABC
-ADMIN_IDS=123456,789012   # telegram IDs of admins/dispatchers
+ADMIN_IDS=123456,789012   # telegram IDs of administrators
 DATABASE_URL=sqlite+aiosqlite:///./bot.db   # or postgresql+asyncpg://user:pass@localhost/botdb
 ESCALATION_MINUTES=20
 ```
@@ -119,7 +119,7 @@ in-progress registration and request forms survive bot restarts. Without a
 - **Resident**: `/start` -> ФИО + квартира -> 📝 Создать заявку -> выбор категории -> описание -> уведомления
 - **Worker**: диспетчер добавляет по Telegram ID + категория -> `▶️ На смену` -> 📋 Доступные заявки -> Принять (атомарный claim) -> 🔧 Мои заявки -> Закрыть
 - **Dispatcher**: 📋 Все заявки (пагинация) -> Назначить/Переназначить -> ➕ Добавить исполнителя -> 📢 Создать объявление (broadcast)
-- **Admin**: same as dispatcher via ADMIN_IDS
+- **Administrator**: all dispatcher access plus authorized destructive actions, including deleting any request or announcement; `ADMIN_IDS` users are bootstrapped into this role
 
 ## Atomic claim
 

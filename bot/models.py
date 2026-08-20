@@ -14,7 +14,7 @@ class User(Base):
     __tablename__ = "users"
     __table_args__ = (
         CheckConstraint(
-            "role IN ('resident', 'worker', 'dispatcher')",
+            "role IN ('resident', 'worker', 'dispatcher', 'administrator')",
             name="ck_users_role",
         ),
         CheckConstraint(
@@ -31,7 +31,7 @@ class User(Base):
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, index=True)
     full_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     apartment: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    role: Mapped[str] = mapped_column(String(20), default="resident", nullable=False)  # resident | worker | dispatcher
+    role: Mapped[str] = mapped_column(String(20), default="resident", nullable=False)  # resident | worker | dispatcher | administrator
     worker_category: Mapped[str | None] = mapped_column(String(20), nullable=True)  # electrician | plumber | security
     # NULL means that a new user has not made the initial language choice yet.
     language: Mapped[str | None] = mapped_column(String(2), nullable=True)

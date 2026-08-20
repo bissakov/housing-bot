@@ -86,7 +86,9 @@ async def notify_workers_force(
 async def notify_dispatchers(
     bot: Bot, session: AsyncSession, text: str, **kwargs
 ) -> DeliveryReport:
-    result = await session.execute(select(User).where(User.role == "dispatcher"))
+    result = await session.execute(
+        select(User).where(User.role.in_(("dispatcher", "administrator")))
+    )
     db_dispatchers = result.scalars().all()
     recipients = {user.telegram_id for user in db_dispatchers} | set(ADMIN_IDS)
     # Synthetic demo accounts have no chat; skip them instead of burning a failed API call each.

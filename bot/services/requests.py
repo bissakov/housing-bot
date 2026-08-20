@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select, update, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from bot.models import Request, RequestEvent, User, Announcement
-from bot.auth import is_dispatcher
+from bot.auth import is_administrator, is_dispatcher
 from bot.constants import REQUEST_CATEGORIES, URGENCY_LEVELS
 
 
@@ -152,7 +152,7 @@ async def assign_request(
 
 
 async def delete_request(session: AsyncSession, request_id: int, actor: User) -> tuple[bool, str]:
-    """Dispatcher can delete any; resident can delete only own 'new' requests."""
+    """Administrators can delete any; residents only their own new requests."""
     result = await session.execute(select(Request).where(Request.id == request_id))
     req = result.scalar_one_or_none()
     if not req:
@@ -160,8 +160,8 @@ async def delete_request(session: AsyncSession, request_id: int, actor: User) ->
 
     is_owner = req.resident_id == actor.id
 
-    if is_dispatcher(actor):
-        details = "by=dispatcher"
+    if is_administrator(actor):
+        details = "by=administrator"
     elif is_owner and req.status == "new":
         details = "by=resident"
     else:
@@ -176,8 +176,8 @@ async def delete_request(session: AsyncSession, request_id: int, actor: User) ->
 
 
 async def delete_announcement(session: AsyncSession, ann_id: int, actor: User) -> tuple[bool, str]:
-    if not is_dispatcher(actor):
-        return False, "Только диспетчер может удалять объявления"
+    if not is_administrator(actor):
+        return False, "Только администратор может удалять объявления"
 
     result = await session.execute(select(Announcement).where(Announcement.id == ann_id))
     ann = result.scalar_one_or_none()

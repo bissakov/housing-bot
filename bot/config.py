@@ -83,5 +83,5 @@ LLM_DUPLICATE_CONFIDENCE_THRESHOLD = settings.llm_duplicate_confidence_threshold
 
 
 def is_admin(telegram_id: int) -> bool:
-    """Configured admin bypass is deliberately limited to development mode."""
-    return DEV_MODE and telegram_id in ADMIN_IDS
+    """Return whether Telegram configuration designates an administrator."""
+    return telegram_id in ADMIN_IDS

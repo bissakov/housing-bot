@@ -25,7 +25,7 @@ from bot.services.llm import get_llm
 from bot.states import WorkerCompletionStates
 from bot.timezone import format_local
 from bot.services.schedules import get_schedule_status
-from bot.i18n import t
+from bot.i18n import t, text_variants
 
 router = Router()
 
@@ -131,7 +131,7 @@ async def build_worker_mine(session: AsyncSession, user: User, page: int) -> tup
     return text, InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
 
-@router.message(F.text.in_({"▶️ На смену", "⏸️ Уйти со смены", "▶️ Ауысымға шығу", "⏸️ Ауысымнан шығу"}))
+@router.message(F.text.in_(text_variants("shift_on") | text_variants("shift_off")))
 async def toggle_shift(message: Message, session: AsyncSession):
     result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
     user = result.scalar_one_or_none()
@@ -144,7 +144,7 @@ async def toggle_shift(message: Message, session: AsyncSession):
     await message.answer(status, reply_markup=worker_menu(user.is_on_shift, user.language))
 
 
-@router.message(F.text.in_({"📋 Доступные заявки", "📋 Қолжетімді өтінімдер"}))
+@router.message(F.text.in_(text_variants("available_requests")))
 async def available_requests(message: Message, session: AsyncSession):
     result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
     user = result.scalar_one_or_none()
@@ -161,7 +161,7 @@ async def available_requests(message: Message, session: AsyncSession):
     await message.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
-@router.message(F.text.in_({"🔧 Мои заявки", "🔧 Менің өтінімдерім"}))
+@router.message(F.text.in_(text_variants("worker_my_requests")))
 async def my_worker_requests(message: Message, session: AsyncSession):
     result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
     user = result.scalar_one_or_none()
@@ -301,7 +301,17 @@ async def handle_claim(callback: CallbackQuery, session: AsyncSession, bot: Bot)
         rres = await session.execute(select(User).where(User.id == req.resident_id))
         resident = rres.scalar_one_or_none()
         if resident:
-            await notify_resident(bot, resident.telegram_id, f"✅ Ваша заявка #{req.id} принята исполнителем {worker.full_name or worker.telegram_id}")
+            await notify_resident(
+                bot,
+                resident.telegram_id,
+                "",
+                language=resident.language,
+                message_key="request_accepted_notification",
+                message_values={
+                    "id": req.id,
+                    "worker": worker.full_name or worker.telegram_id,
+                },
+            )
         await notify_dispatchers(bot, session, f"✅ Заявка #{req.id} принята: {worker.full_name or worker.telegram_id} ({CATEGORY_LABELS.get(worker.worker_category,'')})")
 
 

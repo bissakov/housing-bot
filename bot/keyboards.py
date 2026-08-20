@@ -1,13 +1,13 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 from bot.constants import CATEGORY_LABELS, STATUS_LABELS
-from bot.i18n import DEFAULT_LANGUAGE, category_label, normalize_language, t
+from bot.i18n import DEFAULT_LANGUAGE, category_label, language_choices, normalize_language, t
 
 
 def language_keyboard() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.button(text="🇰🇿 Қазақша", callback_data="set_language:kk")
-    b.button(text="🇷🇺 Русский", callback_data="set_language:ru")
+    for code, label in language_choices():
+        b.button(text=label, callback_data=f"set_language:{code}")
     b.adjust(1)
     return b.as_markup()
 
@@ -23,10 +23,9 @@ def category_keyboard(prefix: str = "req_category", language: str = DEFAULT_LANG
 def resident_menu(language: str = DEFAULT_LANGUAGE) -> ReplyKeyboardMarkup:
     language = normalize_language(language)
     b = ReplyKeyboardBuilder()
-    labels = {
-        "kk": ("📝 Өтінім жасау", "📋 Менің өтінімдерім", "📢 Хабарландырулар", "Әрекетті таңдаңыз"),
-        "ru": ("📝 Создать заявку", "📋 Мои заявки", "📢 Объявления", "Выберите действие"),
-    }[language]
+    labels = tuple(t(key, language) for key in (
+        "create_request", "my_requests", "announcements_button", "resident_placeholder"
+    ))
     for label in labels[:3]:
         b.button(text=label)
     b.adjust(2, 1)
@@ -40,10 +39,13 @@ def resident_menu(language: str = DEFAULT_LANGUAGE) -> ReplyKeyboardMarkup:
 def worker_menu(is_on_shift: bool, language: str = DEFAULT_LANGUAGE) -> ReplyKeyboardMarkup:
     language = normalize_language(language)
     b = ReplyKeyboardBuilder()
-    labels = {
-        "kk": (("⏸️ Ауысымнан шығу" if is_on_shift else "▶️ Ауысымға шығу"), "📋 Қолжетімді өтінімдер", "🔧 Менің өтінімдерім", "📢 Хабарландырулар", "Орындаушы мәзірі"),
-        "ru": (("⏸️ Уйти со смены" if is_on_shift else "▶️ На смену"), "📋 Доступные заявки", "🔧 Мои заявки", "📢 Объявления", "Меню исполнителя"),
-    }[language]
+    labels = (
+        t("shift_off" if is_on_shift else "shift_on", language),
+        t("available_requests", language),
+        t("worker_my_requests", language),
+        t("announcements_button", language),
+        t("worker_placeholder", language),
+    )
     for label in labels[:4]:
         b.button(text=label)
     b.adjust(2, 2)
@@ -57,10 +59,11 @@ def worker_menu(is_on_shift: bool, language: str = DEFAULT_LANGUAGE) -> ReplyKey
 def dispatcher_menu(language: str = DEFAULT_LANGUAGE) -> ReplyKeyboardMarkup:
     language = normalize_language(language)
     b = ReplyKeyboardBuilder()
-    labels = {
-        "kk": ("📊 Жиынтық", "📋 Барлық өтінімдер", "⏳ Растауға", "➕ Орындаушы қосу", "🗓 Орындаушылар кестесі", "📢 Хабарландыру жасау", "📢 Хабарландырулар", "Диспетчер тақтасы"),
-        "ru": ("📊 Сводка", "📋 Все заявки", "⏳ На подтверждение", "➕ Добавить исполнителя", "🗓 Графики исполнителей", "📢 Создать объявление", "📢 Объявления", "Панель диспетчера"),
-    }[language]
+    labels = tuple(t(key, language) for key in (
+        "summary", "all_requests", "pending_workers", "add_worker",
+        "worker_schedules", "announcement", "announcements_button",
+        "dispatcher_placeholder",
+    ))
     for label in labels[:7]:
         b.button(text=label)
     b.adjust(2, 2, 2)
@@ -74,10 +77,8 @@ def dispatcher_menu(language: str = DEFAULT_LANGUAGE) -> ReplyKeyboardMarkup:
 def registration_role_keyboard(language: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
     language = normalize_language(language)
     b = InlineKeyboardBuilder()
-    resident = "🏠 Мен тұрғынмын" if language == "kk" else "🏠 Я житель"
-    worker = "🔧 Мен орындаушымын" if language == "kk" else "🔧 Я исполнитель"
-    b.button(text=resident, callback_data="reg_role:resident")
-    b.button(text=worker, callback_data="reg_role:worker")
+    b.button(text=t("registration_resident", language), callback_data="reg_role:resident")
+    b.button(text=t("registration_worker", language), callback_data="reg_role:worker")
     b.button(text=t("cancel", language), callback_data="cancel_fsm")
     b.adjust(1)
     return b.as_markup()

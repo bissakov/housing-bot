@@ -4,7 +4,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from sqlalchemy import select
 
 from bot.handlers.common import cmd_start, set_language
-from bot.i18n import category_label, t
+from bot.i18n import SUPPORTED_LANGUAGES, TEXTS, category_label, normalize_language, t, text_variants
+from bot.keyboards import dispatcher_menu, resident_menu, worker_menu
 from bot.keyboards import reply_cancel_keyboard
 from bot.models import User
 from tests.conftest import make_callback, make_message
@@ -18,6 +19,33 @@ def test_kazakh_is_default_language():
     assert t("main_menu", None) == "Басты мәзір"
     assert category_label("security", "kk") == "🛡️ Күзет"
     assert t("main_menu", "ru") == "Главное меню"
+
+
+def test_regional_language_codes_are_normalized():
+    assert normalize_language("ru-RU") == "ru"
+    assert normalize_language("kk_KZ") == "kk"
+
+
+def test_every_message_is_translated_into_every_supported_language():
+    assert TEXTS
+    assert all(set(translations) == SUPPORTED_LANGUAGES for translations in TEXTS.values())
+
+
+def test_text_variants_come_from_the_catalogue():
+    assert text_variants("cancel") == frozenset({"❌ Болдырмау", "❌ Отмена"})
+
+
+def test_each_menu_uses_only_the_requested_language():
+    resident_texts = {button.text for row in resident_menu("kk").keyboard for button in row}
+    worker_texts = {button.text for row in worker_menu(False, "ru").keyboard for button in row}
+    dispatcher_texts = {button.text for row in dispatcher_menu("kk").keyboard for button in row}
+
+    assert "📝 Өтінім жасау" in resident_texts
+    assert "📝 Создать заявку" not in resident_texts
+    assert "▶️ На смену" in worker_texts
+    assert "▶️ Ауысымға шығу" not in worker_texts
+    assert "📊 Жиынтық" in dispatcher_texts
+    assert "📊 Сводка" not in dispatcher_texts
 
 
 def test_schedule_messages_are_localized():

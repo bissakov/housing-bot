@@ -13,7 +13,7 @@ from bot.config import ADMIN_IDS
 from bot.constants import CATEGORY_LABELS, REQUEST_CATEGORIES
 from bot.states import RegistrationStates
 from bot.services.notify import notify_dispatchers
-from bot.i18n import t
+from bot.i18n import SUPPORTED_LANGUAGES, t, text_variants
 from bot.keyboards import resident_menu, worker_menu, dispatcher_menu, confirm_delete_keyboard, approval_keyboard, cancel_keyboard, reply_cancel_keyboard, language_keyboard
 from bot.timezone import format_local
 
@@ -45,7 +45,7 @@ async def cancel_fsm_cb(callback: CallbackQuery, state: FSMContext, session: Asy
         await callback.message.answer(t("main_menu", u.language), reply_markup=kb)
     await callback.answer()
 
-@router.message(F.text.in_({"❌ Отмена", "❌ Болдырмау"}))
+@router.message(F.text.in_(text_variants("cancel")))
 async def cancel_fsm_text(message: Message, state: FSMContext, session: AsyncSession):
     cur = await state.get_state()
     if cur is None:
@@ -148,7 +148,7 @@ async def cmd_language(message: Message, state: FSMContext, session: AsyncSessio
 @router.callback_query(F.data.startswith("set_language:"))
 async def set_language(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     language = callback.data.split(":", 1)[1]
-    if language not in {"kk", "ru"}:
+    if language not in SUPPORTED_LANGUAGES:
         await callback.answer()
         return
     result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
@@ -379,7 +379,7 @@ async def build_announcement_detail(session: AsyncSession, ann_id: int, page: in
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-@router.message(F.text.in_({"📢 Объявления", "📢 Хабарландырулар"}))
+@router.message(F.text.in_(text_variants("announcements_button")))
 async def show_announcements(message: Message, session: AsyncSession):
     result_u = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
     viewer = result_u.scalar_one_or_none()

@@ -1,6 +1,12 @@
-"""Small, explicit Kazakh/Russian message catalogue."""
+"""Explicit, strictly validated user-facing translations."""
 
-SUPPORTED_LANGUAGES = {"kk", "ru"}
+# Add a locale here and to every catalogue below. Validation is deliberately
+# strict: silently showing another language is worse than failing at startup.
+LANGUAGE_NAMES = {
+    "kk": "🇰🇿 Қазақша",
+    "ru": "🇷🇺 Русский",
+}
+SUPPORTED_LANGUAGES = frozenset(LANGUAGE_NAMES)
 DEFAULT_LANGUAGE = "kk"
 
 
@@ -32,6 +38,35 @@ TEXTS = {
     "main_menu": {"kk": "Басты мәзір", "ru": "Главное меню"},
     "cancel": {"kk": "❌ Болдырмау", "ru": "❌ Отмена"},
     "cancelled": {"kk": "❌ Болдырылмады.", "ru": "❌ Отменено."},
+    "create_request": {"kk": "📝 Өтінім жасау", "ru": "📝 Создать заявку"},
+    "my_requests": {"kk": "📋 Менің өтінімдерім", "ru": "📋 Мои заявки"},
+    "shift_on": {"kk": "▶️ Ауысымға шығу", "ru": "▶️ На смену"},
+    "shift_off": {"kk": "⏸️ Ауысымнан шығу", "ru": "⏸️ Уйти со смены"},
+    "available_requests": {"kk": "📋 Қолжетімді өтінімдер", "ru": "📋 Доступные заявки"},
+    "worker_my_requests": {"kk": "🔧 Менің өтінімдерім", "ru": "🔧 Мои заявки"},
+    "summary": {"kk": "📊 Жиынтық", "ru": "📊 Сводка"},
+    "all_requests": {"kk": "📋 Барлық өтінімдер", "ru": "📋 Все заявки"},
+    "pending_workers": {"kk": "⏳ Растауға", "ru": "⏳ На подтверждение"},
+    "add_worker": {"kk": "➕ Орындаушы қосу", "ru": "➕ Добавить исполнителя"},
+    "announcements_button": {"kk": "📢 Хабарландырулар", "ru": "📢 Объявления"},
+    "resident_placeholder": {"kk": "Әрекетті таңдаңыз", "ru": "Выберите действие"},
+    "worker_placeholder": {"kk": "Орындаушы мәзірі", "ru": "Меню исполнителя"},
+    "dispatcher_placeholder": {"kk": "Диспетчер тақтасы", "ru": "Панель диспетчера"},
+    "registration_resident": {"kk": "🏠 Мен тұрғынмын", "ru": "🏠 Я житель"},
+    "registration_worker": {"kk": "🔧 Мен орындаушымын", "ru": "🔧 Я исполнитель"},
+    "announcement_broadcast": {"kk": "📢 <b>Хабарландыру</b>\n\n{text}", "ru": "📢 <b>Объявление</b>\n\n{text}"},
+    "new_request_notification": {
+        "kk": "🆕 <b>Жаңа өтінім #{id}</b>\nСанат: {category}\nМекенжай: {address} | {resident}\nСипаттама: {description}\n\nҚабылдау үшін «{available_requests}» басыңыз.",
+        "ru": "🆕 <b>Новая заявка #{id}</b>\nКатегория: {category}\nАдрес: {address} | {resident}\nОписание: {description}\n\nНажмите «{available_requests}» чтобы принять.",
+    },
+    "no_available_workers": {
+        "kk": "⚠️ Жаңа #{id} өтініміне ауысымдағы қолжетімді орындаушылар жоқ.",
+        "ru": "⚠️ Для новой заявки #{id} нет доступных исполнителей на смене.",
+    },
+    "request_accepted_notification": {
+        "kk": "✅ Сіздің #{id} өтініміңізді {worker} орындаушысы қабылдады",
+        "ru": "✅ Ваша заявка #{id} принята исполнителем {worker}",
+    },
     "unknown_category": {"kk": "Белгісіз санат", "ru": "Неизвестная категория"},
     "start_first": {"kk": "Алдымен /start пәрменін басыңыз", "ru": "Сначала /start"},
     "registration_error": {"kk": "Қате. /start пәрменінен қайта бастаңыз", "ru": "Ошибка, попробуйте /start заново"},
@@ -120,12 +155,59 @@ URGENCY_LABELS = {
 }
 
 
+def _validate_catalogs() -> None:
+    for key, translations in TEXTS.items():
+        languages = set(translations)
+        if languages != SUPPORTED_LANGUAGES:
+            raise RuntimeError(
+                f"Invalid translation {key!r}: expected {sorted(SUPPORTED_LANGUAGES)}, "
+                f"got {sorted(languages)}"
+            )
+
+    for name, labels in (
+        ("category", CATEGORY_LABELS),
+        ("status", STATUS_LABELS),
+        ("urgency", URGENCY_LABELS),
+    ):
+        if set(labels) != SUPPORTED_LANGUAGES:
+            raise RuntimeError(f"Invalid language set in {name} labels")
+        expected_values = set(labels[DEFAULT_LANGUAGE])
+        for language, localized in labels.items():
+            if set(localized) != expected_values:
+                raise RuntimeError(f"Incomplete {name} labels for {language!r}")
+
+
+_validate_catalogs()
+
+
 def normalize_language(language: str | None) -> str:
-    return language if language in SUPPORTED_LANGUAGES else DEFAULT_LANGUAGE
+    if not language:
+        return DEFAULT_LANGUAGE
+    normalized = language.strip().lower().replace("_", "-").split("-", 1)[0]
+    return normalized if normalized in SUPPORTED_LANGUAGES else DEFAULT_LANGUAGE
+
+
+def language_choices():
+    return LANGUAGE_NAMES.items()
 
 
 def t(key: str, language: str | None, **values) -> str:
-    return TEXTS[key][normalize_language(language)].format(**values)
+    normalized = normalize_language(language)
+    try:
+        template = TEXTS[key][normalized]
+    except KeyError as exc:
+        raise KeyError(f"Missing translation {key!r} for language {normalized!r}") from exc
+    return template.format(**values)
+
+
+def text_variants(key: str) -> frozenset[str]:
+    """Return all localized values for a Telegram text filter."""
+    return frozenset(TEXTS[key].values())
+
+
+def render(key: str, language: str | None, values: dict | None = None) -> str:
+    """Render a message key with a recipient locale."""
+    return t(key, language, **(values or {}))
 
 
 def category_label(category: str | None, language: str | None) -> str:

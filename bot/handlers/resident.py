@@ -18,7 +18,7 @@ from html import escape
 from bot.auth import is_approved_resident
 from bot.callbacks import ResidentRequestCallback
 from bot.constants import URGENCY_LABELS
-from bot.i18n import category_label, t
+from bot.i18n import category_label, t, text_variants
 from bot.timezone import format_local
 
 router = Router()
@@ -42,7 +42,7 @@ async def resident_cancel_cb(callback: CallbackQuery, state: FSMContext, session
         await callback.message.answer(t("main_menu", u.language), reply_markup=kb)
     await callback.answer()
 
-@router.message(F.text.in_({"❌ Отмена", "❌ Болдырмау"}))
+@router.message(F.text.in_(text_variants("cancel")))
 async def resident_cancel_text(message: Message, state: FSMContext, session: AsyncSession):
     if await state.get_state() is None:
         return
@@ -156,7 +156,7 @@ async def build_resident_detail(session: AsyncSession, request_id: int, page: in
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-@router.message(F.text.in_({"📝 Создать заявку", "📝 Өтінім жасау"}))
+@router.message(F.text.in_(text_variants("create_request")))
 async def start_request(message: Message, state: FSMContext, session: AsyncSession):
     result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
     user = result.scalar_one_or_none()
@@ -240,21 +240,28 @@ def _created_text(req: Request, category: str, urgency: str | None, ai: bool) ->
 
 async def _notify_new_request(bot: Bot, session: AsyncSession, req: Request, user: User,
                               category: str, description: str) -> None:
-    notify_text = (
-        f"🆕 <b>Новая заявка #{req.id}</b>\n"
-        f"Категория: {CATEGORY_LABELS[category]}\n"
-        f"Адрес: кв. {escape(user.apartment or '?')} | {escape(user.full_name or '')}\n"
-        f"Описание: {escape(description[:500])}\n\n"
-        f"Нажмите «📋 Доступные заявки» чтобы принять."
-    )
     report = await notify_workers(
-        bot, session, category, notify_text, urgency=req.urgency
+        bot,
+        session,
+        category,
+        "",
+        urgency=req.urgency,
+        message_key="new_request_notification",
+        message_values={
+            "id": req.id,
+            "category": category,
+            "address": escape(user.apartment or "?"),
+            "resident": escape(user.full_name or ""),
+            "description": escape(description[:500]),
+        },
     )
     if report.delivered == 0:
         await notify_dispatchers(
             bot,
             session,
-            f"⚠️ Для новой заявки #{req.id} нет доступных исполнителей на смене.",
+            "",
+            message_key="no_available_workers",
+            message_values={"id": req.id},
         )
 
 
@@ -701,7 +708,7 @@ async def confirm_ai_suggestion(callback: CallbackQuery, state: FSMContext, sess
         )
     await callback.answer()
 
-@router.message(F.text.in_({"📋 Мои заявки", "📋 Менің өтінімдерім"}))
+@router.message(F.text.in_(text_variants("my_requests")))
 async def my_requests(message: Message, session: AsyncSession):
     result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
     user = result.scalar_one_or_none()

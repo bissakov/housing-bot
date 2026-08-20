@@ -600,11 +600,17 @@ async def cancel_assign(callback: CallbackQuery):
 PEND_PAGE_SIZE = 5
 
 async def build_pending_list(session: AsyncSession, page: int) -> tuple[str, InlineKeyboardMarkup]:
-    total_res = await session.execute(select(func.count()).select_from(User).where(User.is_approved.is_(False)))
+    pending_filter = (
+        User.is_approved.is_(False),
+        ~((User.role == "resident") & (User.resident_subrole == "tenant")),
+    )
+    total_res = await session.execute(
+        select(func.count()).select_from(User).where(*pending_filter)
+    )
     total = total_res.scalar() or 0
     total_pages = (total + PEND_PAGE_SIZE - 1) // PEND_PAGE_SIZE if total else 1
     page = max(0, min(page, total_pages - 1))
-    res = await session.execute(select(User).where(User.is_approved.is_(False)).order_by(User.created_at.desc()).limit(PEND_PAGE_SIZE).offset(page * PEND_PAGE_SIZE))
+    res = await session.execute(select(User).where(*pending_filter).order_by(User.created_at.desc()).limit(PEND_PAGE_SIZE).offset(page * PEND_PAGE_SIZE))
     pending = res.scalars().all()
     if not pending:
         return "✅ Нет ожидающих подтверждения.", InlineKeyboardMarkup(inline_keyboard=[])
@@ -703,10 +709,15 @@ async def approve_user(callback: CallbackQuery, session: AsyncSession, bot: Bot)
     if not u:
         await callback.answer("Пользователь не найден", show_alert=True)
         return
+    if u.role == "resident" and u.resident_subrole == "tenant":
+        await callback.answer("Арендатора подтверждает собственник", show_alert=True)
+        return
     if u.is_approved:
         await callback.answer("Уже одобрен", show_alert=True)
         return
     u.is_approved = True
+    if u.role == "resident" and u.resident_subrole is None:
+        u.resident_subrole = "owner"
     await session.commit()
     await callback.message.edit_text(callback.message.text + "\n\n✅ Одобрен")
     await callback.answer("Одобрен")
@@ -727,6 +738,9 @@ async def reject_user(callback: CallbackQuery, session: AsyncSession, bot: Bot):
     u = result.scalar_one_or_none()
     if not u:
         await callback.answer("Не найден", show_alert=True)
+        return
+    if u.role == "resident" and u.resident_subrole == "tenant":
+        await callback.answer("Арендатора подтверждает собственник", show_alert=True)
         return
     tid = u.telegram_id
     await session.delete(u)

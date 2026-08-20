@@ -4,6 +4,7 @@ from aiogram.fsm.state import State, StatesGroup
 class RegistrationStates(StatesGroup):
     waiting_language = State()
     waiting_role = State()
+    waiting_resident_subrole = State()
     waiting_name = State()
     waiting_apartment = State()
     waiting_worker_category = State()

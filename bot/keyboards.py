@@ -20,19 +20,22 @@ def category_keyboard(prefix: str = "req_category", language: str = DEFAULT_LANG
     return b.as_markup()
 
 
-def resident_menu(language: str = DEFAULT_LANGUAGE) -> ReplyKeyboardMarkup:
+def resident_menu(
+    language: str = DEFAULT_LANGUAGE, *, is_owner: bool = False
+) -> ReplyKeyboardMarkup:
     language = normalize_language(language)
     b = ReplyKeyboardBuilder()
-    labels = tuple(t(key, language) for key in (
-        "create_request", "my_requests", "announcements_button", "resident_placeholder"
-    ))
-    for label in labels[:3]:
+    menu_keys = ["create_request", "my_requests", "announcements_button"]
+    if is_owner:
+        menu_keys.append("manage_tenant")
+    labels = tuple(t(key, language) for key in menu_keys)
+    for label in labels:
         b.button(text=label)
-    b.adjust(2, 1)
+    b.adjust(2, 2 if is_owner else 1)
     return b.as_markup(
         resize_keyboard=True,
         is_persistent=True,
-        input_field_placeholder=labels[3],
+        input_field_placeholder=t("resident_placeholder", language),
     )
 
 
@@ -79,6 +82,18 @@ def registration_role_keyboard(language: str = DEFAULT_LANGUAGE) -> InlineKeyboa
     b = InlineKeyboardBuilder()
     b.button(text=t("registration_resident", language), callback_data="reg_role:resident")
     b.button(text=t("registration_worker", language), callback_data="reg_role:worker")
+    b.button(text=t("cancel", language), callback_data="cancel_fsm")
+    b.adjust(1)
+    return b.as_markup()
+
+
+def registration_resident_subrole_keyboard(
+    language: str = DEFAULT_LANGUAGE,
+) -> InlineKeyboardMarkup:
+    language = normalize_language(language)
+    b = InlineKeyboardBuilder()
+    b.button(text=t("subrole_owner", language), callback_data="reg_resident_subrole:owner")
+    b.button(text=t("subrole_tenant", language), callback_data="reg_resident_subrole:tenant")
     b.button(text=t("cancel", language), callback_data="cancel_fsm")
     b.adjust(1)
     return b.as_markup()

@@ -14,7 +14,11 @@ from bot.constants import CATEGORY_LABELS, REQUEST_CATEGORIES
 from bot.states import RegistrationStates
 from bot.services.notify import notify_dispatchers
 from bot.i18n import SUPPORTED_LANGUAGES, t, text_variants
-from bot.keyboards import resident_menu, worker_menu, dispatcher_menu, confirm_delete_keyboard, approval_keyboard, cancel_keyboard, reply_cancel_keyboard, language_keyboard
+from bot.keyboards import (
+    resident_menu, worker_menu, dispatcher_menu, confirm_delete_keyboard,
+    approval_keyboard, cancel_keyboard, reply_cancel_keyboard, language_keyboard,
+    registration_resident_subrole_keyboard,
+)
 from bot.timezone import format_local
 
 router = Router()
@@ -27,7 +31,9 @@ def get_main_keyboard(user: User):
         return dispatcher_menu(user.language)
     if user.role == "worker":
         return worker_menu(user.is_on_shift, user.language)
-    return resident_menu(user.language)
+    return resident_menu(
+        user.language, is_owner=user.resident_subrole == "owner"
+    )
 
 
 def _is_dispatcher(user: User) -> bool:
@@ -102,6 +108,18 @@ async def _show_start(message: Message, state: FSMContext, session: AsyncSession
             reply_markup=registration_role_keyboard(user.language),
         )
         return
+    if (
+        not user.is_approved
+        and user.role == "resident"
+        and user.resident_subrole is None
+    ):
+        await state.update_data(reg_role="resident")
+        await message.answer(
+            t("choose_resident_subrole", user.language),
+            reply_markup=registration_resident_subrole_keyboard(user.language),
+        )
+        await state.set_state(RegistrationStates.waiting_resident_subrole)
+        return
     if not user.is_approved and user.role in ("resident", "worker") and not user.full_name:
         # Half-finished registration (bot restarted, FSM lost): resume at step 1 for either role.
         await state.update_data(reg_role=user.role)
@@ -116,6 +134,8 @@ async def _show_start(message: Message, state: FSMContext, session: AsyncSession
     if not user.is_approved:
         if user.role == "worker":
             await message.answer(t("waiting_worker", user.language))
+        elif user.resident_subrole == "tenant":
+            await message.answer(t("waiting_tenant", user.language))
         else:
             await message.answer(t("waiting_resident", user.language))
         return
@@ -124,7 +144,10 @@ async def _show_start(message: Message, state: FSMContext, session: AsyncSession
     role_label = t(f"role_{user.role}", user.language)
     pending_note = ""
     if _is_dispatcher(user):
-        pend = await session.execute(select(User).where(User.is_approved.is_(False)))
+        pend = await session.execute(select(User).where(
+            User.is_approved.is_(False),
+            ~((User.role == "resident") & (User.resident_subrole == "tenant")),
+        ))
         cnt = len(pend.scalars().all())
         if cnt:
             pending_note = f"\n⏳ {t('pending_approval', user.language)}: {cnt}"
@@ -184,6 +207,8 @@ async def reg_role_choice(callback: CallbackQuery, state: FSMContext, session: A
     if choice == "worker":
         if u:
             u.role = "worker"
+            u.resident_subrole = None
+            u.approved_by_owner_id = None
             await session.commit()
         # Workers give their name first, same as residents — dispatchers approve a person, not a TG id.
         await state.update_data(reg_role="worker")
@@ -192,11 +217,49 @@ async def reg_role_choice(callback: CallbackQuery, state: FSMContext, session: A
         await state.set_state(RegistrationStates.waiting_name)
         await callback.answer()
         return
-    # resident
+    if u:
+        u.role = "resident"
+        u.resident_subrole = None
+        u.approved_by_owner_id = None
+        await session.commit()
     await state.update_data(reg_role="resident")
-    await callback.message.edit_text(t("step_name", language))
-    # keep reply keyboard separately
-    await callback.message.answer(t("enter_name", language), reply_markup=reply_cancel_keyboard(language))
+    await callback.message.edit_text(
+        t("choose_resident_subrole", language),
+        reply_markup=registration_resident_subrole_keyboard(language)
+    )
+    await state.set_state(RegistrationStates.waiting_resident_subrole)
+    await callback.answer()
+
+
+@router.callback_query(
+    RegistrationStates.waiting_resident_subrole,
+    F.data.startswith("reg_resident_subrole:"),
+)
+async def reg_resident_subrole(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+):
+    subrole = callback.data.split(":", 1)[1]
+    if subrole not in {"owner", "tenant"}:
+        await callback.answer(t("registration_error"), show_alert=True)
+        return
+    result = await session.execute(
+        select(User).where(User.telegram_id == callback.from_user.id)
+    )
+    user = result.scalar_one_or_none()
+    if not user:
+        await callback.answer(t("start_first"), show_alert=True)
+        await state.clear()
+        return
+    user.role = "resident"
+    user.resident_subrole = subrole
+    user.approved_by_owner_id = None
+    await session.commit()
+    await state.update_data(reg_role="resident")
+    await callback.message.edit_text(t(f"subrole_{subrole}", user.language))
+    await callback.message.answer(
+        t("enter_name", user.language),
+        reply_markup=reply_cancel_keyboard(user.language),
+    )
     await state.set_state(RegistrationStates.waiting_name)
     await callback.answer()
 
@@ -299,11 +362,33 @@ async def reg_apartment(message: Message, state: FSMContext, session: AsyncSessi
     user.is_approved = False
     await session.commit()
     await state.clear()
-    await message.answer(
-        t("registration_done", user.language, name=escape(full_name), apartment=escape(apartment))
-    )
+    completion_key = "tenant_registration_done" if user.resident_subrole == "tenant" else "registration_done"
+    await message.answer(t(
+        completion_key, user.language,
+        name=escape(full_name), apartment=escape(apartment),
+    ))
+    if user.resident_subrole == "tenant":
+        owners_result = await session.execute(select(User).where(
+            User.role == "resident",
+            User.resident_subrole == "owner",
+            User.apartment == apartment,
+            User.is_approved.is_(True),
+        ))
+        notification = (
+            f"🔑 <b>Арендатор ожидает подтверждения</b>\n"
+            f"{escape(full_name)}, кв. {escape(apartment)}"
+        )
+        markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+            text="🔑 Управление арендатором", callback_data="tenant_manage"
+        )]])
+        for owner in owners_result.scalars():
+            try:
+                await bot.send_message(owner.telegram_id, notification, parse_mode="HTML", reply_markup=markup)
+            except Exception:
+                logger.exception("tenant_registration_owner_notification_failed owner_id=%s", owner.id)
+        return
     text = (
-        f"🆕 <b>Новый житель на подтверждение</b>\n"
+        f"🆕 <b>Новый собственник на подтверждение</b>\n"
         f"{escape(full_name)}, кв. {escape(apartment)}, TG ID: <code>{tid}</code>\n"
         f"Нажмите ниже чтобы одобрить:"
     )

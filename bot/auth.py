@@ -21,6 +21,15 @@ def is_approved_resident(user: User | None) -> bool:
     return bool(user and user.role == "resident" and user.is_approved)
 
 
+def is_approved_owner(user: User | None) -> bool:
+    return bool(
+        user
+        and user.role == "resident"
+        and user.resident_subrole == "owner"
+        and user.is_approved
+    )
+
+
 def is_approved_worker(user: User | None) -> bool:
     return bool(user and user.role == "worker" and user.is_approved)
 

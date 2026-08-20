@@ -32,15 +32,22 @@ class User(Base):
     full_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     apartment: Mapped[str | None] = mapped_column(String(20), nullable=True)
     role: Mapped[str] = mapped_column(String(20), default="resident", nullable=False)  # resident | worker | dispatcher | administrator
+    resident_subrole: Mapped[str | None] = mapped_column(String(20), nullable=True)  # owner | tenant
     worker_category: Mapped[str | None] = mapped_column(String(20), nullable=True)  # electrician | plumber | security
     # NULL means that a new user has not made the initial language choice yet.
     language: Mapped[str | None] = mapped_column(String(2), nullable=True)
     is_approved: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    approved_by_owner_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
     is_on_shift: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     requests: Mapped[list["Request"]] = relationship("Request", back_populates="resident", foreign_keys="Request.resident_id")
     assigned_requests: Mapped[list["Request"]] = relationship("Request", back_populates="worker", foreign_keys="Request.worker_id")
+    approved_by_owner: Mapped["User | None"] = relationship(
+        "User", remote_side="User.id", foreign_keys=[approved_by_owner_id]
+    )
     working_hours: Mapped[list["WorkerWorkingHour"]] = relationship(
         "WorkerWorkingHour", back_populates="worker", cascade="all, delete-orphan"
     )

@@ -2,6 +2,7 @@ from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from sqlalchemy import select, func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -15,7 +16,7 @@ import json
 import logging
 from bot.services.notify import notify_workers, notify_dispatchers
 from html import escape
-from bot.auth import is_approved_resident
+from bot.auth import is_approved_owner, is_approved_resident
 from bot.callbacks import ResidentRequestCallback
 from bot.constants import URGENCY_LABELS
 from bot.i18n import category_label, t, text_variants
@@ -25,6 +26,169 @@ router = Router()
 logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 5
+
+
+def _tenant_management_keyboard(
+    tenant: User | None, candidates: list[User]
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if tenant:
+        rows.append([InlineKeyboardButton(
+            text="❌ Отозвать доступ", callback_data=f"tenant_revoke:{tenant.id}"
+        )])
+    else:
+        rows.extend([
+            [InlineKeyboardButton(
+                text=f"✅ {candidate.full_name or candidate.telegram_id}",
+                callback_data=f"tenant_approve:{candidate.id}",
+            )]
+            for candidate in candidates
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _tenant_management_view(
+    session: AsyncSession, owner: User
+) -> tuple[str, InlineKeyboardMarkup]:
+    active_result = await session.execute(select(User).where(
+        User.role == "resident",
+        User.resident_subrole == "tenant",
+        User.apartment == owner.apartment,
+        User.is_approved.is_(True),
+    ))
+    active = active_result.scalar_one_or_none()
+    candidates: list[User] = []
+    if active is None:
+        candidates_result = await session.execute(select(User).where(
+            User.role == "resident",
+            User.resident_subrole == "tenant",
+            User.apartment == owner.apartment,
+            User.is_approved.is_(False),
+        ).order_by(User.created_at))
+        candidates = list(candidates_result.scalars())
+    if active:
+        text = (
+            "🔑 <b>Арендатор квартиры</b>\n"
+            f"{escape(active.full_name or str(active.telegram_id))}\n\n"
+            "Можно отозвать доступ и затем одобрить другого арендатора."
+        )
+    elif candidates:
+        text = (
+            "🔑 <b>Заявки арендаторов вашей квартиры</b>\n"
+            "Можно одобрить одного арендатора:"
+        )
+    else:
+        text = "🔑 Заявок арендаторов для вашей квартиры пока нет."
+    return text, _tenant_management_keyboard(active, candidates)
+
+
+async def _load_owner(session: AsyncSession, telegram_id: int) -> User | None:
+    result = await session.execute(select(User).where(User.telegram_id == telegram_id))
+    user = result.scalar_one_or_none()
+    return user if is_approved_owner(user) else None
+
+
+@router.message(F.text.in_(text_variants("manage_tenant")))
+async def manage_tenant(message: Message, session: AsyncSession):
+    owner = await _load_owner(session, message.from_user.id)
+    if not owner:
+        await message.answer("Эта функция доступна только подтвержденному собственнику.")
+        return
+    text, markup = await _tenant_management_view(session, owner)
+    await message.answer(text, parse_mode="HTML", reply_markup=markup)
+
+
+@router.callback_query(F.data == "tenant_manage")
+async def manage_tenant_callback(callback: CallbackQuery, session: AsyncSession):
+    owner = await _load_owner(session, callback.from_user.id)
+    if not owner:
+        await callback.answer("Доступно только собственнику", show_alert=True)
+        return
+    text, markup = await _tenant_management_view(session, owner)
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("tenant_approve:"))
+async def approve_tenant(callback: CallbackQuery, session: AsyncSession, bot: Bot):
+    owner = await _load_owner(session, callback.from_user.id)
+    if not owner:
+        await callback.answer("Доступно только собственнику", show_alert=True)
+        return
+    tenant_id = int(callback.data.split(":", 1)[1])
+    tenant_result = await session.execute(select(User).where(
+        User.id == tenant_id,
+        User.role == "resident",
+        User.resident_subrole == "tenant",
+        User.apartment == owner.apartment,
+        User.is_approved.is_(False),
+    ))
+    tenant = tenant_result.scalar_one_or_none()
+    active_result = await session.execute(select(func.count()).select_from(User).where(
+        User.role == "resident",
+        User.resident_subrole == "tenant",
+        User.apartment == owner.apartment,
+        User.is_approved.is_(True),
+    ))
+    if tenant is None:
+        await callback.answer("Заявка не найдена", show_alert=True)
+        return
+    if (active_result.scalar() or 0) >= 1:
+        await callback.answer("Для квартиры уже одобрен арендатор", show_alert=True)
+        return
+    tenant.is_approved = True
+    tenant.approved_by_owner_id = owner.id
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        await callback.answer(
+            "Для квартиры уже одобрен арендатор", show_alert=True
+        )
+        return
+    try:
+        await bot.send_message(
+            tenant.telegram_id,
+            "✅ Собственник подтвердил ваш доступ. Теперь вы можете пользоваться ботом.",
+            reply_markup=resident_menu(tenant.language),
+        )
+    except Exception:
+        logger.exception("tenant_approval_notification_failed tenant_id=%s", tenant.id)
+    text, markup = await _tenant_management_view(session, owner)
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+    await callback.answer("Арендатор одобрен")
+
+
+@router.callback_query(F.data.startswith("tenant_revoke:"))
+async def revoke_tenant(callback: CallbackQuery, session: AsyncSession, bot: Bot):
+    owner = await _load_owner(session, callback.from_user.id)
+    if not owner:
+        await callback.answer("Доступно только собственнику", show_alert=True)
+        return
+    tenant_id = int(callback.data.split(":", 1)[1])
+    tenant_result = await session.execute(select(User).where(
+        User.id == tenant_id,
+        User.apartment == owner.apartment,
+        User.resident_subrole == "tenant",
+        User.is_approved.is_(True),
+    ))
+    tenant = tenant_result.scalar_one_or_none()
+    if tenant is None:
+        await callback.answer("Арендатор не найден", show_alert=True)
+        return
+    tenant.is_approved = False
+    tenant.approved_by_owner_id = None
+    await session.commit()
+    try:
+        await bot.send_message(
+            tenant.telegram_id,
+            "❌ Собственник отозвал ваш доступ к боту.",
+        )
+    except Exception:
+        logger.exception("tenant_revocation_notification_failed tenant_id=%s", tenant.id)
+    text, markup = await _tenant_management_view(session, owner)
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+    await callback.answer("Доступ отозван")
 
 @router.callback_query(F.data == "cancel_fsm")
 async def resident_cancel_cb(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
@@ -306,7 +470,12 @@ async def choose_category(callback: CallbackQuery, state: FSMContext, session: A
         await callback.message.edit_text(
             _created_text(req, category, urgency, bool(meta)), parse_mode="HTML"
         )
-        await callback.message.answer("Исполнители на смене получили уведомление.", reply_markup=resident_menu())
+        await callback.message.answer(
+            "Исполнители на смене получили уведомление.",
+            reply_markup=resident_menu(
+                user.language, is_owner=user.resident_subrole == "owner"
+            ),
+        )
         await _notify_new_request(bot, session, req, user, category, description)
         await callback.answer()
         return
@@ -537,7 +706,10 @@ async def _create_checked_request(
     await state.clear()
     await message.answer(
         _created_text(req, category, urgency, bool(meta)),
-        parse_mode="HTML", reply_markup=resident_menu(),
+        parse_mode="HTML",
+        reply_markup=resident_menu(
+            user.language, is_owner=user.resident_subrole == "owner"
+        ),
     )
     await _notify_new_request(bot, session, req, user, category, description)
 
@@ -624,7 +796,12 @@ async def resolve_duplicate(callback: CallbackQuery, state: FSMContext, session:
     await callback.message.edit_text(
         _created_text(req, draft["category"], draft.get("urgency"), bool(meta)), parse_mode="HTML",
     )
-    await callback.message.answer("Исполнители на смене получили уведомление.", reply_markup=resident_menu())
+    await callback.message.answer(
+        "Исполнители на смене получили уведомление.",
+        reply_markup=resident_menu(
+            user.language, is_owner=user.resident_subrole == "owner"
+        ),
+    )
     await _notify_new_request(bot, session, req, user, draft["category"], draft["description"])
     await callback.answer()
 

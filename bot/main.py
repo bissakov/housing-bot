@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from aiogram import Bot, Dispatcher
+from aiogram.types import BotCommand
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -51,6 +52,18 @@ async def main():
         from bot.handlers import dev as dev_handler
         dp.include_router(dev_handler.router)
         logger.warning("DEV_MODE=ON — /dev handler enabled (disable in prod)")
+
+    # Register the command menu shown in Telegram clients.
+    # Keep in sync with the actual slash handlers in bot/handlers/*.
+    commands = [BotCommand(command="start", description="Регистрация и главное меню")]
+    if DEV_MODE:
+        commands.append(BotCommand(command="dev", description="Быстро сменить роль (только для разработки и отладки)"))
+        commands.append(BotCommand(command="reset", description="Удалить профиль и заново зарегистрироваться (только для разработки и отладки)"))
+    try:
+        await bot.set_my_commands(commands)
+        logger.info("Bot commands registered: %s", [c.command for c in commands])
+    except Exception as exc:  # noqa: BLE001 - don't block startup on menu sync
+        logger.warning("Failed to set bot commands: %s", exc)
 
     scheduler = setup_scheduler(bot, async_session)
     logger.info("Scheduler started")

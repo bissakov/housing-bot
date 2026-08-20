@@ -128,3 +128,17 @@ in-progress registration and request forms survive bot restarts. Without a
 ## Escalation
 
 APScheduler every 1 min checks `status='new'` older than 20 min -> notify dispatchers.
+
+## LLM duplicate checks and dynamic priority
+
+- Before saving, the bot compares a draft with at most 12 active requests in
+  the same category. Closed requests never block creation.
+- On a possible match, the LLM asks the resident one distinguishing question.
+  A duplicate is blocked only after that answer and only at confidence
+  `LLM_DUPLICATE_CONFIDENCE_THRESHOLD` or higher (default `0.92`). The resident
+  can always override a false match and create a new request.
+- An unavailable LLM or an ambiguous result is fail-open: the request is
+  created so a genuinely new incident is not lost.
+- Worker queues are dynamically sorted by `high`, `normal`, then `low`, with
+  escalated and older requests first within a priority. Closing a higher
+  priority task therefore promotes the next task without another LLM call.

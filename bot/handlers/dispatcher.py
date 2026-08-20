@@ -8,7 +8,7 @@ from html import escape
 import logging
 
 from bot.models import User, Request, RequestEvent
-from bot.constants import URGENCY_LABELS
+from bot.constants import URGENCY_LABELS, REQUEST_CATEGORIES
 from bot.states import AnnouncementStates, AddWorkerStates
 from bot.keyboards import (
     CATEGORY_LABELS, STATUS_LABELS,
@@ -705,8 +705,10 @@ async def create_ann_finish(message: Message, state: FSMContext, session: AsyncS
     try:
         llm = get_llm()
         if llm.enabled:
-            polished = (await llm.polish(text)).text.strip()
-            if polished and polished != text and len(polished) >= 10:
+            res = await llm.polish(text)
+            polished = res.text.strip()
+            # off_topic => the draft is not a resident announcement; don't suggest.
+            if not res.off_topic and polished and polished != text and len(polished) >= 10:
                 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
                 await state.update_data(pending_ann_raw=text, pending_ann_polished=polished)
                 kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -715,7 +717,8 @@ async def create_ann_finish(message: Message, state: FSMContext, session: AsyncS
                     [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_fsm")],
                 ])
                 await message.answer(
-                    f"✨ Предлагаю улучшенный текст:\n\n<i>{polished[:800]}</i>\n\nОригинал: <i>{text[:400]}</i>",
+                    f"✨ Предлагаю улучшенный текст:\n\n<i>{escape(polished[:800])}</i>\n\n"
+                    f"Оригинал: <i>{escape(text[:400])}</i>",
                     parse_mode="HTML", reply_markup=kb
                 )
                 return
@@ -784,7 +787,8 @@ async def ai_triage(callback: CallbackQuery, session: AsyncSession):
         await callback.answer("✨ Анализирую...")
         tri = await llm.triage(req.description, req.category)
         await callback.message.answer(
-            f"✨ <b>ИИ-триаж #{req.id}</b>\nПриоритет: <b>{tri.priority}</b>\nКратко: {tri.summary}\nПодсказка: {tri.hint}",
+            f"✨ <b>ИИ-триаж #{req.id}</b>\nПриоритет: <b>{escape(tri.priority)}</b>\n"
+            f"Кратко: {escape(tri.summary)}\nПодсказка: {escape(tri.hint)}",
             parse_mode="HTML"
         )
     except Exception:

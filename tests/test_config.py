@@ -18,6 +18,9 @@ def test_settings_reject_invalid_llm_threshold():
     with pytest.raises(ValidationError):
         Settings(llm_auto_category_threshold=1.5)
 
+    with pytest.raises(ValidationError):
+        Settings(llm_duplicate_confidence_threshold=-0.1)
+
 
 def test_runtime_validation_requires_bot_token():
     with pytest.raises(RuntimeError, match="BOT_TOKEN"):

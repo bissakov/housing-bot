@@ -1,6 +1,6 @@
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from sqlalchemy import select, func
+from sqlalchemy import select, func, case
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from html import escape
@@ -17,6 +17,16 @@ router = Router()
 
 PAGE_SIZE = 5
 
+
+def _priority_order():
+    """High-priority open work stays first; closing it promotes the next item."""
+    return (
+        case((Request.urgency == "high", 0), (Request.urgency == "normal", 1),
+             (Request.urgency == "low", 2), else_=3),
+        Request.is_escalated.desc(),
+        Request.created_at.asc(),
+    )
+
 async def build_worker_available(session: AsyncSession, user: User, page: int) -> tuple[str, InlineKeyboardMarkup]:
     from sqlalchemy import func
     # total new of this category
@@ -28,7 +38,7 @@ async def build_worker_available(session: AsyncSession, user: User, page: int) -
         select(Request)
         .options(selectinload(Request.resident))
         .where(Request.category == user.worker_category, Request.status == "new")
-        .order_by(Request.created_at.desc()).limit(PAGE_SIZE).offset(page * PAGE_SIZE)
+        .order_by(*_priority_order()).limit(PAGE_SIZE).offset(page * PAGE_SIZE)
     )
     reqs = q.scalars().all()
     if not reqs:
@@ -42,7 +52,8 @@ async def build_worker_available(session: AsyncSession, user: User, page: int) -
         if len(desc) > 55:
             desc = desc[:55] + "…"
         date = req.created_at.strftime("%d.%m %H:%M") if req.created_at else ""
-        lines.append(f"<b>#{req.id}</b> {escape(addr)} {escape(resident.full_name if resident else '')} • {date}\n<i>{desc}</i>\n")
+        priority = URGENCY_LABELS.get(req.urgency, "Обычный")
+        lines.append(f"<b>#{req.id}</b> • {priority} • {escape(addr)} {escape(resident.full_name if resident else '')} • {date}\n<i>{desc}</i>\n")
     text = "\n".join(lines)
     kb_rows: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
@@ -72,7 +83,7 @@ async def build_worker_mine(session: AsyncSession, user: User, page: int) -> tup
         select(Request)
         .options(selectinload(Request.resident))
         .where(Request.worker_id == user.id, Request.status == "accepted")
-        .order_by(Request.created_at.desc()).limit(PAGE_SIZE).offset(page * PAGE_SIZE)
+        .order_by(*_priority_order()).limit(PAGE_SIZE).offset(page * PAGE_SIZE)
     )
     reqs = q.scalars().all()
     if not reqs:

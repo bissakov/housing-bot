@@ -11,6 +11,9 @@ class RegistrationStates(StatesGroup):
 class RequestStates(StatesGroup):
     waiting_category = State()
     waiting_description = State()
+    waiting_confirm = State()
+    waiting_duplicate_clarification = State()
+    waiting_duplicate_decision = State()
 
 
 class AnnouncementStates(StatesGroup):

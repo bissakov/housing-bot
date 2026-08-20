@@ -184,7 +184,7 @@ async def test_resident_create_request_fsm(session, fake_bot):
     # 2) choose category via callback
     cb = make_callback("req_category:plumber", tg_id=501)
     cb.message.edit_text = AsyncMock()
-    await choose_category(cb, state)
+    await choose_category(cb, state, session, fake_bot)
     data = await state.get_data()
     assert data["category"] == "plumber"
 

@@ -10,6 +10,7 @@ from bot.states import RequestStates
 from bot.keyboards import category_keyboard, category_keyboard_with_cancel, CATEGORY_LABELS, STATUS_LABELS, resident_menu, resident_request_keyboard, cancel_keyboard
 from bot.services.requests import create_request, get_requests_for_resident
 from bot.services.llm import get_llm
+from bot.config import LLM_DUPLICATE_CONFIDENCE_THRESHOLD
 import json
 import logging
 from bot.services.notify import notify_workers, notify_dispatchers
@@ -164,7 +165,8 @@ async def start_request(message: Message, state: FSMContext, session: AsyncSessi
                 reply_markup=category_keyboard_with_cancel("req_category"),
             )
             await state.set_state(RequestStates.waiting_description)
-            await state.update_data(category=None, llm_intake=True)
+            # set_data (not update_data) so a cancelled flow leaves no pending_* behind
+            await state.set_data({"category": None, "llm_intake": True})
             return
     except Exception:
         pass
@@ -174,14 +176,122 @@ async def start_request(message: Message, state: FSMContext, session: AsyncSessi
         reply_markup=category_keyboard_with_cancel("req_category"),
     )
     await state.set_state(RequestStates.waiting_category)
+    await state.set_data({"category": None})
+
+
+# --- request intake helpers ------------------------------------------------
+
+MIN_DESCRIPTION_LEN = 10
+# After this many rejected attempts we let the resident file the заявка as-is,
+# so an over-strict model can never lock them out of reporting a real problem.
+WEAK_ATTEMPTS_BEFORE_OVERRIDE = 2
+
+
+def _norm(text: str) -> str:
+    """Loose comparison key: is the model's rewrite actually different?"""
+    return " ".join((text or "").lower().split())
+
+
+async def _load_resident(session: AsyncSession, telegram_id: int) -> User | None:
+    result = await session.execute(select(User).where(User.telegram_id == telegram_id))
+    user = result.scalar_one_or_none()
+    return user if is_approved_resident(user) else None
+
+
+async def _classify(raw: str, category: str | None):
+    """Run the LLM scope/quality gate. Returns None when the LLM is unavailable."""
+    try:
+        llm = get_llm()
+        if not llm.enabled:
+            return None
+        return await llm.classify_and_enrich(raw, category=category)
+    except Exception:
+        logger.exception("request_classification_failed")
+        return None
+
+
+async def _persist_request(session, user, *, category, description, urgency, raw_description, meta):
+    llm_meta = json.dumps(meta, ensure_ascii=False) if meta else None
+    req = await create_request(
+        session, resident_id=user.id, category=category, description=description,
+        urgency=urgency, raw_description=raw_description, llm_meta=llm_meta,
+    )
+    await session.commit()
+    return req
+
+
+def _created_text(req: Request, category: str, urgency: str | None, ai: bool) -> str:
+    return (
+        f"✅ <b>Заявка #{req.id} создана</b>\n\n"
+        f"{CATEGORY_LABELS[category]}{' • ✨ обработано ИИ' if ai else ''}\n"
+        f"{STATUS_LABELS['new']} • {URGENCY_LABELS.get(urgency or 'normal')} приоритет\n\n"
+        "Мы уведомили подходящих исполнителей. Статус можно проверить в разделе «📋 Мои заявки»."
+    )
+
+
+async def _notify_new_request(bot: Bot, session: AsyncSession, req: Request, user: User,
+                              category: str, description: str) -> None:
+    notify_text = (
+        f"🆕 <b>Новая заявка #{req.id}</b>\n"
+        f"Категория: {CATEGORY_LABELS[category]}\n"
+        f"Адрес: кв. {escape(user.apartment or '?')} | {escape(user.full_name or '')}\n"
+        f"Описание: {escape(description[:500])}\n\n"
+        f"Нажмите «📋 Доступные заявки» чтобы принять."
+    )
+    report = await notify_workers(bot, session, category, notify_text)
+    if report.delivered == 0:
+        await notify_dispatchers(
+            bot,
+            session,
+            f"⚠️ Для новой заявки #{req.id} нет доступных исполнителей на смене.",
+        )
+
+
+def _suggestion_keyboard(can_recategorize: bool) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="✅ Создать заявку", callback_data="req_ai:accept")],
+        [InlineKeyboardButton(text="📝 Оставить моё описание", callback_data="req_ai:mine")],
+    ]
+    if can_recategorize:
+        rows.append([InlineKeyboardButton(text="🔀 Другая категория", callback_data="req_ai:recat")])
+    rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_fsm")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 @router.callback_query(F.data.startswith("req_category:"))
-async def choose_category(callback: CallbackQuery, state: FSMContext):
+async def choose_category(callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot):
     category = callback.data.split(":")[1]
     if category not in CATEGORY_LABELS:
         await callback.answer("Неизвестная категория")
         return
+    data = await state.get_data()
+    pending_raw = data.get("pending_raw")
+
+    # The description was already collected (LLM outage fallback, or "другая
+    # категория" from the suggestion card): file it now instead of re-asking.
+    if pending_raw:
+        user = await _load_resident(session, callback.from_user.id)
+        if not user:
+            await callback.answer("Ошибка пользователя", show_alert=True)
+            return
+        description = data.get("pending_enriched") or pending_raw
+        meta = data.get("pending_meta")
+        if meta:
+            meta = {**meta, "category_source": "manual"}
+        urgency = data.get("pending_urgency")
+        req = await _persist_request(
+            session, user, category=category, description=description, urgency=urgency,
+            raw_description=pending_raw if description != pending_raw else None, meta=meta,
+        )
+        await state.clear()
+        await callback.message.edit_text(
+            _created_text(req, category, urgency, bool(meta)), parse_mode="HTML"
+        )
+        await callback.message.answer("Исполнители на смене получили уведомление.", reply_markup=resident_menu())
+        await _notify_new_request(bot, session, req, user, category, description)
+        await callback.answer()
+        return
+
     await state.update_data(category=category, llm_intake=False)
     await callback.message.edit_text(
         f"📝 <b>Новая заявка</b>\n\n"
@@ -199,161 +309,383 @@ async def choose_category(callback: CallbackQuery, state: FSMContext):
 async def input_description(message: Message, state: FSMContext, session: AsyncSession, bot: Bot):
     data = await state.get_data()
     category = data.get("category")
-    llm_intake = bool(data.get("llm_intake")) and category is None
     description_raw = message.text.strip()
-    if len(description_raw) < 10:
+    if len(description_raw) < MIN_DESCRIPTION_LEN:
         await message.answer(
             "Опишите проблему подробнее: добавьте место и детали — минимум 10 символов."
         )
         return
 
-    # --- LLM auto-classify + enrich (OpenAI-compatible) ---
-    description = description_raw
-    urgency = None
-    raw_description = None
-    llm_meta = None
-    chosen_category = category
-    auto_conf = 0.0
-    if not category or llm_intake:
-        try:
-            llm = get_llm()
-            if llm.enabled:
-                from bot.config import LLM_AUTO_CATEGORY_THRESHOLD
-                res = await llm.classify_and_enrich(description_raw)
-                # only enrich if we got something usable
-                if res.enriched and len(res.enriched) >= 10:
-                    description = res.enriched
-                    urgency = res.urgency
-                    raw_description = description_raw
-                    llm_meta = json.dumps({"category": res.category, "confidence": res.confidence, "reason": res.reason, "urgency": res.urgency}, ensure_ascii=False)
-                    auto_conf = res.confidence
-                    # decide category
-                    if res.confidence >= LLM_AUTO_CATEGORY_THRESHOLD:
-                        chosen_category = res.category
-                    else:
-                        # low confidence -> ask confirm
-                        await state.update_data(
-                            pending_category=res.category,
-                            pending_confidence=res.confidence,
-                            pending_enriched=description,
-                            pending_urgency=urgency,
-                            pending_raw=description_raw,
-                            pending_meta=llm_meta,
-                        )
-                        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-                        kb = InlineKeyboardMarkup(inline_keyboard=[
-                            [InlineKeyboardButton(text=f"✅ {CATEGORY_LABELS[res.category]} (уверенность {res.confidence:.0%})", callback_data="llm_confirm:yes"),
-                             InlineKeyboardButton(text="Выбрать вручную", callback_data="llm_confirm:no")],
-                            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_fsm")],
-                        ])
-                        await message.answer(
-                            f"Я определил категорию как <b>{CATEGORY_LABELS[res.category]}</b> (уверенность {res.confidence:.0%}, приоритет {urgency}).\n"
-                            f"Улучшенное описание: <i>{description[:400]}</i>\n\nПодтвердить?",
-                            parse_mode="HTML", reply_markup=kb
-                        )
-                        return
-        except Exception:
-            logger.exception("request_classification_failed")
-            # fallback to deterministic: need category
-            if not chosen_category:
-                await message.answer("Не удалось определить категорию автоматически. Выберите вручную:", reply_markup=category_keyboard_with_cancel("req_category"))
-                await state.set_state(RequestStates.waiting_category)
-                # stash raw to reuse after pick
-                await state.update_data(pending_enriched=description_raw, pending_raw=description_raw)
-                return
-    if not chosen_category:
-        await message.answer("Ошибка категории, начните заново: 📝 Создать заявку")
-        await state.clear()
-        return
-    category = chosen_category
-    # if llm had pending enrichment from prior freeform, reuse when user now picked manually
-    if not llm_meta and data.get("pending_enriched") and description == description_raw:
-        if len(data.get("pending_enriched","")) >= 10:
-            description = data.get("pending_enriched")
-            raw_description = data.get("pending_raw") or description_raw
-            llm_meta = data.get("pending_meta")
-            urgency = data.get("pending_urgency") or urgency
+    # --- LLM gate: ЖКХ scope check + quality check + rewrite -----------------
+    # Runs on both intake paths: free-form (category=None) and manual pick.
+    res = await _classify(description_raw, category)
 
-    result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
-    user = result.scalar_one_or_none()
-    if not is_approved_resident(user):
+    if res is None:
+        # LLM disabled or failed — degrade to the deterministic flow.
+        if not category:
+            await message.answer(
+                "Не удалось определить категорию автоматически. Выберите вручную:",
+                reply_markup=category_keyboard_with_cancel("req_category"),
+            )
+            await state.update_data(pending_raw=description_raw, pending_enriched=None, pending_meta=None)
+            await state.set_state(RequestStates.waiting_category)
+            return
+        await _finalize_from_message(
+            message, state, session, bot, category=category,
+            description=description_raw, urgency=None, raw_description=None, meta=None,
+        )
+        return
+
+    if res.decision == "off_topic":
+        # Hard reject: this bot is not a general-purpose assistant.
+        await message.answer(
+            "🚫 <b>Это не похоже на заявку по дому.</b>\n\n"
+            f"{escape(res.follow_up)}\n\n"
+            "Опишите проблему по дому — или нажмите «❌ Отмена».",
+            parse_mode="HTML",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+
+    if res.decision == "needs_detail":
+        attempts = int(data.get("weak_attempts", 0)) + 1
+        await state.update_data(weak_attempts=attempts, weak_raw=description_raw)
+        kb = cancel_keyboard()
+        extra = ""
+        if attempts >= WEAK_ATTEMPTS_BEFORE_OVERRIDE:
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📨 Всё равно отправить", callback_data="req_desc:force")],
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_fsm")],
+            ])
+            extra = "\n\nЕсли добавить нечего — отправьте как есть."
+        await message.answer(
+            f"✏️ <b>Нужно чуть больше деталей.</b>\n\n{escape(res.follow_up)}{extra}",
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
+        return
+
+    # --- accepted -----------------------------------------------------------
+    from bot.config import LLM_AUTO_CATEGORY_THRESHOLD
+    final_category = category or res.category
+    if final_category not in CATEGORY_LABELS:
+        # Should be impossible (client downgrades accept+no-category), but never
+        # let a bad model reply raise KeyError mid-flow.
+        logger.warning("llm_accept_without_category reason=%r", res.reason)
+        await message.answer(
+            "Не удалось определить категорию. Выберите вручную:",
+            reply_markup=category_keyboard_with_cancel("req_category"),
+        )
+        await state.update_data(pending_raw=description_raw, pending_enriched=None, pending_meta=None)
+        await state.set_state(RequestStates.waiting_category)
+        return
+    meta = {
+        "category": res.category, "confidence": res.confidence,
+        "reason": res.reason, "urgency": res.urgency, "decision": res.decision,
+    }
+    suggests_rewrite = (
+        len(res.enriched) >= MIN_DESCRIPTION_LEN and _norm(res.enriched) != _norm(description_raw)
+    )
+    category_is_guess = not category
+    confident = res.confidence >= LLM_AUTO_CATEGORY_THRESHOLD
+
+    # Nothing to review: the category is settled and the text is unchanged.
+    if not suggests_rewrite and (category or confident):
+        await _finalize_from_message(
+            message, state, session, bot, category=final_category,
+            description=description_raw, urgency=res.urgency, raw_description=None,
+            meta={**meta, "applied": "original"},
+        )
+        return
+
+    await state.update_data(
+        pending_category=final_category,
+        pending_confidence=res.confidence,
+        pending_enriched=res.enriched,
+        pending_urgency=res.urgency,
+        pending_raw=description_raw,
+        pending_meta=meta,
+    )
+    await state.set_state(RequestStates.waiting_confirm)
+
+    cat_line = CATEGORY_LABELS[final_category]
+    if category_is_guess:
+        cat_line += f" · определено ИИ, уверенность {res.confidence:.0%}"
+    body = (
+        "✨ <b>Проверьте заявку</b>\n\n"
+        f"Категория: {cat_line}\n"
+        f"Приоритет: {URGENCY_LABELS.get(res.urgency, res.urgency)}\n"
+    )
+    if suggests_rewrite:
+        body += (
+            f"\n<b>Предлагаю описание:</b>\n<i>{escape(res.enriched[:400])}</i>\n"
+            f"\n<b>Ваш текст:</b>\n<i>{escape(description_raw[:400])}</i>"
+        )
+    else:
+        body += f"\n<b>Описание:</b>\n<i>{escape(description_raw[:400])}</i>"
+    await message.answer(
+        body, parse_mode="HTML",
+        reply_markup=_suggestion_keyboard(can_recategorize=category_is_guess),
+    )
+
+
+async def _finalize_from_message(message: Message, state: FSMContext, session: AsyncSession, bot: Bot,
+                                 *, category, description, urgency, raw_description, meta):
+    user = await _load_resident(session, message.from_user.id)
+    if not user:
         await message.answer("Ошибка пользователя")
         await state.clear()
         return
-
-    req = await create_request(session, resident_id=user.id, category=category, description=description, urgency=urgency, raw_description=raw_description, llm_meta=llm_meta)
-    await session.commit()
-    await state.clear()
-
-    await message.answer(
-        f"✅ <b>Заявка #{req.id} создана</b>\n\n"
-        f"{CATEGORY_LABELS[category]}{' • ✨ обработано ИИ' if llm_meta else ''}\n"
-        f"{STATUS_LABELS['new']} • {URGENCY_LABELS.get(urgency or 'normal')} приоритет\n\n"
-        "Мы уведомили подходящих исполнителей. Статус можно проверить в разделе «📋 Мои заявки».",
-        parse_mode="HTML",
-        reply_markup=resident_menu()
+    if await _start_duplicate_check(
+        message, state, session, user, category=category,
+        description=description, urgency=urgency,
+        raw_description=raw_description, meta=meta,
+    ):
+        return
+    await _create_checked_request(
+        message, state, session, bot, user=user, category=category,
+        description=description, urgency=urgency,
+        raw_description=raw_description, meta=meta,
     )
 
-    notify_text = (
-        f"🆕 <b>Новая заявка #{req.id}</b>\n"
-        f"Категория: {CATEGORY_LABELS[category]}\n"
-        f"Адрес: кв. {escape(user.apartment or '?')} | {escape(user.full_name or '')}\n"
-        f"Описание: {escape(description[:500])}\n\n"
-        f"Нажмите «📋 Доступные заявки» чтобы принять."
+
+async def _duplicate_candidates(session: AsyncSession, user: User, category: str) -> list[dict]:
+    """Fetch only recent active candidates; closed requests cannot block filing."""
+    result = await session.execute(
+        select(Request)
+        .where(Request.status.in_(("new", "accepted")))
+        .where(Request.category == category)
+        .order_by((Request.resident_id == user.id).desc(), Request.created_at.desc())
+        .limit(12)
     )
-    report = await notify_workers(bot, session, category, notify_text)
-    if report.delivered == 0:
-        await notify_dispatchers(
-            bot,
-            session,
-            f"⚠️ Для новой заявки #{req.id} нет доступных исполнителей на смене.",
+    candidates = []
+    for req in result.scalars().all():
+        # Never send another resident's private in-apartment description to the
+        # model. Cross-resident matching is allowed only for explicit shared
+        # building issues, represented by a redacted candidate.
+        text = req.description if req.resident_id == user.id else "Общедомовая заявка той же категории"
+        candidates.append({
+            "id": req.id, "text": text, "same_resident": req.resident_id == user.id,
+        })
+    return candidates
+
+
+async def _start_duplicate_check(
+    message: Message, state: FSMContext, session: AsyncSession, user: User,
+    *, category: str, description: str, urgency, raw_description, meta,
+) -> bool:
+    candidates = await _duplicate_candidates(session, user, category)
+    if not candidates:
+        return False
+    try:
+        result = await get_llm().check_duplicate(description, category, candidates)
+    except Exception:
+        # An unavailable advisory check must not prevent a real incident report.
+        logger.exception("Initial duplicate check failed")
+        return False
+    if result.decision == "unique":
+        return False
+    if result.decision == "duplicate" and result.duplicate_request_id:
+        question = (
+            f"Заявка #{result.duplicate_request_id} уже открыта. "
+            + (result.question or "Это точно та же проблема, или место/объект отличаются?")
         )
+    else:
+        question = result.question
+    await state.update_data(duplicate_draft={
+        "category": category, "description": description, "urgency": urgency,
+        "raw_description": raw_description, "meta": meta,
+        "candidate_ids": [candidate["id"] for candidate in candidates],
+    })
+    await state.set_state(RequestStates.waiting_duplicate_clarification)
+    await message.answer(
+        "🔎 <b>Проверка на повторную заявку</b>\n\n" + escape(question),
+        parse_mode="HTML", reply_markup=cancel_keyboard(),
+    )
+    return True
 
 
-@router.callback_query(F.data.startswith("llm_confirm:"))
-async def llm_confirm(callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot):
+async def _create_checked_request(
+    message: Message, state: FSMContext, session: AsyncSession, bot: Bot,
+    *, user: User, category: str, description: str, urgency, raw_description, meta,
+):
+    req = await _persist_request(
+        session, user, category=category, description=description,
+        urgency=urgency, raw_description=raw_description, meta=meta,
+    )
+    await state.clear()
+    await message.answer(
+        _created_text(req, category, urgency, bool(meta)),
+        parse_mode="HTML", reply_markup=resident_menu(),
+    )
+    await _notify_new_request(bot, session, req, user, category, description)
+
+
+def _duplicate_decision_keyboard(request_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"📋 Открыть заявку #{request_id}", callback_data=f"req_dup:open:{request_id}")],
+        [InlineKeyboardButton(text="➕ Всё равно создать новую", callback_data="req_dup:create")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_fsm")],
+    ])
+
+
+@router.message(RequestStates.waiting_duplicate_clarification, F.text)
+async def duplicate_clarification(message: Message, state: FSMContext, session: AsyncSession, bot: Bot):
+    data = await state.get_data()
+    draft = data.get("duplicate_draft") or {}
+    user = await _load_resident(session, message.from_user.id)
+    if not user or not draft:
+        await state.clear()
+        await message.answer("Проверка устарела, начните создание заявки заново.")
+        return
+    candidates = await _duplicate_candidates(session, user, draft["category"])
+    allowed = set(draft.get("candidate_ids") or [])
+    candidates = [candidate for candidate in candidates if candidate["id"] in allowed]
+    try:
+        result = await get_llm().check_duplicate(
+            draft["description"], draft["category"], candidates, clarification=message.text,
+        )
+    except Exception:
+        logger.exception("Duplicate re-check failed")
+        result = None
+    # A weak or ambiguous result must not reject a potentially new issue.
+    if (result is None or result.decision != "duplicate"
+            or result.confidence < LLM_DUPLICATE_CONFIDENCE_THRESHOLD
+            or result.duplicate_request_id not in allowed):
+        meta = draft.get("meta")
+        if meta:
+            meta = {**meta, "duplicate_check": "unique_or_uncertain"}
+        await _create_checked_request(
+            message, state, session, bot, user=user, category=draft["category"],
+            description=draft["description"], urgency=draft.get("urgency"),
+            raw_description=draft.get("raw_description"), meta=meta,
+        )
+        return
+    await state.update_data(duplicate_request_id=result.duplicate_request_id)
+    await state.set_state(RequestStates.waiting_duplicate_decision)
+    await message.answer(
+        f"Похоже, это повтор заявки <b>#{result.duplicate_request_id}</b>. "
+        "Чтобы не создавать две одинаковые задачи, новую заявку пока не создаю.\n\n"
+        "Если ситуация действительно другая, вы всё равно можете создать новую.",
+        parse_mode="HTML", reply_markup=_duplicate_decision_keyboard(result.duplicate_request_id),
+    )
+
+
+@router.callback_query(RequestStates.waiting_duplicate_decision, F.data.startswith("req_dup:"))
+async def resolve_duplicate(callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot):
+    data = await state.get_data()
+    draft = data.get("duplicate_draft") or {}
+    duplicate_id = data.get("duplicate_request_id")
+    action = callback.data.split(":")[1]
+    user = await _load_resident(session, callback.from_user.id)
+    if action == "open" and user:
+        await state.clear()
+        text, kb = await build_resident_detail(session, int(duplicate_id), 0, user)
+        if text.startswith("Заявка не найдена"):
+            text = (
+                f"Заявка <b>#{duplicate_id}</b> уже зарегистрирована как общедомовая. "
+                "Чужие персональные данные и описание скрыты."
+            )
+            kb = InlineKeyboardMarkup(inline_keyboard=[])
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        await callback.answer()
+        return
+    if not user or not draft:
+        await callback.answer("Проверка устарела", show_alert=True)
+        await state.clear()
+        return
+    meta = {**(draft.get("meta") or {}), "duplicate_override_of": duplicate_id}
+    req = await _persist_request(
+        session, user, category=draft["category"], description=draft["description"],
+        urgency=draft.get("urgency"), raw_description=draft.get("raw_description"), meta=meta,
+    )
+    await state.clear()
+    await callback.message.edit_text(
+        _created_text(req, draft["category"], draft.get("urgency"), bool(meta)), parse_mode="HTML",
+    )
+    await callback.message.answer("Исполнители на смене получили уведомление.", reply_markup=resident_menu())
+    await _notify_new_request(bot, session, req, user, draft["category"], draft["description"])
+    await callback.answer()
+
+
+@router.callback_query(RequestStates.waiting_description, F.data == "req_desc:force")
+async def force_weak_description(callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot):
+    """Escape hatch: file an under-specified but on-topic заявка verbatim."""
+    data = await state.get_data()
+    raw = data.get("weak_raw")
+    category = data.get("category")
+    if not raw:
+        await callback.answer("Опишите проблему сообщением", show_alert=True)
+        return
+    if not category:
+        await state.update_data(pending_raw=raw, pending_enriched=None, pending_meta=None)
+        await state.set_state(RequestStates.waiting_category)
+        await callback.message.edit_text(
+            "Выберите категорию:", reply_markup=category_keyboard_with_cancel("req_category")
+        )
+        await callback.answer()
+        return
+    user = await _load_resident(session, callback.from_user.id)
+    if not user:
+        await callback.answer("Ошибка пользователя", show_alert=True)
+        return
+    await callback.message.edit_text("Проверяю заявку…")
+    if not await _start_duplicate_check(
+        callback.message, state, session, user, category=category, description=raw,
+        urgency=None, raw_description=None, meta=None,
+    ):
+        await _create_checked_request(
+            callback.message, state, session, bot, user=user, category=category,
+            description=raw, urgency=None, raw_description=None, meta=None,
+        )
+    await callback.answer()
+
+
+@router.callback_query(RequestStates.waiting_confirm, F.data.startswith("req_ai:"))
+async def confirm_ai_suggestion(callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot):
+    """Resident reviews the LLM's suggestion. State filter kills stale buttons."""
     choice = callback.data.split(":", 1)[1]
     data = await state.get_data()
-    if choice == "yes":
-        category = data.get("pending_category")
-        description = data.get("pending_enriched") or data.get("pending_raw") or ""
-        urgency = data.get("pending_urgency")
-        raw_description = data.get("pending_raw")
-        llm_meta = data.get("pending_meta")
-        result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-        user = result.scalar_one_or_none()
-        if not is_approved_resident(user):
-            await callback.answer("Ошибка", show_alert=True)
-            return
-        req = await create_request(session, resident_id=user.id, category=category, description=description, urgency=urgency, raw_description=raw_description, llm_meta=llm_meta)
-        await session.commit()
-        await state.clear()
-        await callback.message.edit_text(
-            f"✅ Заявка #{req.id} создана!\nКатегория: {CATEGORY_LABELS.get(category, category)} ✨ ИИ · {STATUS_LABELS['new']}"
-        )
-        await callback.message.answer("Исполнители на смене получили уведомление.", reply_markup=resident_menu())
-        notify_text = (
-            f"🆕 <b>Новая заявка #{req.id}</b>\n"
-            f"Категория: {CATEGORY_LABELS[category]}\n"
-            f"Адрес: кв. {escape(user.apartment or '?')} | {escape(user.full_name or '')}\n"
-            f"Описание: {escape(description[:500])}\n\n"
-            f"Нажмите «📋 Доступные заявки» чтобы принять."
-        )
-        report = await notify_workers(bot, session, category, notify_text)
-        if report.delivered == 0:
-            await notify_dispatchers(
-                bot,
-                session,
-                f"⚠️ Для новой заявки #{req.id} нет доступных исполнителей на смене.",
-            )
-        await callback.answer()
-    else:
-        # manual pick
-        await state.update_data(category=None)
-        await callback.message.edit_text("Выберите категорию вручную:", reply_markup=category_keyboard_with_cancel("req_category"))
-        await state.set_state(RequestStates.waiting_category)
-        await callback.answer()
 
+    if choice == "recat":
+        await state.update_data(category=None)
+        await state.set_state(RequestStates.waiting_category)
+        await callback.message.edit_text(
+            "Выберите категорию:", reply_markup=category_keyboard_with_cancel("req_category")
+        )
+        await callback.answer()
+        return
+
+    raw = data.get("pending_raw") or ""
+    enriched = data.get("pending_enriched") or raw
+    category = data.get("pending_category")
+    if not category or category not in CATEGORY_LABELS:
+        await callback.answer("Категория потерялась, начните заново", show_alert=True)
+        await state.clear()
+        return
+
+    use_ai = choice == "accept"
+    description = enriched if use_ai else raw
+    meta = data.get("pending_meta")
+    if meta:
+        meta = {**meta, "applied": "enriched" if use_ai else "original"}
+    user = await _load_resident(session, callback.from_user.id)
+    if not user:
+        await callback.answer("Ошибка пользователя", show_alert=True)
+        return
+    urgency = data.get("pending_urgency")
+    await callback.message.edit_text("Проверяю заявку…")
+    if not await _start_duplicate_check(
+        callback.message, state, session, user, category=category,
+        description=description, urgency=urgency,
+        raw_description=raw if use_ai and description != raw else None, meta=meta,
+    ):
+        await _create_checked_request(
+            callback.message, state, session, bot, user=user, category=category,
+            description=description, urgency=urgency,
+            raw_description=raw if use_ai and description != raw else None, meta=meta,
+        )
+    await callback.answer()
 
 @router.message(F.text == "📋 Мои заявки")
 async def my_requests(message: Message, session: AsyncSession):

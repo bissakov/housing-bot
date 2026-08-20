@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-4o-mini"
     llm_timeout_seconds: float = Field(default=12.0, gt=0, le=120)
     llm_auto_category_threshold: float = Field(default=0.85, ge=0, le=1)
+    # A model may block a draft as a duplicate only above this threshold and
+    # only after the resident has answered a distinguishing question.
+    llm_duplicate_confidence_threshold: float = Field(default=0.92, ge=0, le=1)
 
     @field_validator("admin_ids", mode="before")
     @classmethod
@@ -76,6 +79,7 @@ LLM_BASE_URL = settings.llm_base_url
 LLM_MODEL = settings.llm_model
 LLM_TIMEOUT_SECONDS = settings.llm_timeout_seconds
 LLM_AUTO_CATEGORY_THRESHOLD = settings.llm_auto_category_threshold
+LLM_DUPLICATE_CONFIDENCE_THRESHOLD = settings.llm_duplicate_confidence_threshold
 
 
 def is_admin(telegram_id: int) -> bool:

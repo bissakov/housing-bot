@@ -45,7 +45,7 @@ async def dispatcher_cancel_cb(callback: CallbackQuery, state: FSMContext, sessi
         await callback.message.answer("Главное меню", reply_markup=kb)
     await callback.answer()
 
-@router.message(F.text == "❌ Отмена")
+@router.message(F.text.in_({"❌ Отмена", "❌ Болдырмау"}))
 async def dispatcher_cancel_text(message: Message, state: FSMContext, session: AsyncSession):
     if await state.get_state() is None:
         return
@@ -255,7 +255,7 @@ async def _dispatcher_counts(session: AsyncSession) -> tuple[dict[str, int], dic
     return dict(status_result.all()), dict(category_result.all())
 
 
-@router.message(F.text == "📊 Сводка")
+@router.message(F.text.in_({"📊 Сводка", "📊 Жиынтық"}))
 async def dispatcher_summary(message: Message, session: AsyncSession):
     result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
     user = result.scalar_one_or_none()
@@ -294,7 +294,7 @@ async def dispatcher_summary(message: Message, session: AsyncSession):
     await message.answer("\n".join(lines), parse_mode="HTML", reply_markup=kb)
 
 
-@router.message(F.text == "📋 Все заявки")
+@router.message(F.text.in_({"📋 Все заявки", "📋 Барлық өтінімдер"}))
 async def all_requests(message: Message, session: AsyncSession):
     result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
     user = result.scalar_one_or_none()
@@ -597,7 +597,7 @@ async def build_pending_detail(session: AsyncSession, user_id: int, page: int) -
 
 # --- Pending approvals (spec: resident needs dispatcher approval) ---
 
-@router.message(F.text == "⏳ На подтверждение")
+@router.message(F.text.in_({"⏳ На подтверждение", "⏳ Растауға"}))
 async def pending_approvals(message: Message, session: AsyncSession):
     result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
     viewer = result.scalar_one_or_none()
@@ -684,7 +684,7 @@ async def reject_user(callback: CallbackQuery, session: AsyncSession, bot: Bot):
 
 # Announcements
 
-@router.message(F.text == "📢 Создать объявление")
+@router.message(F.text.in_({"📢 Создать объявление", "📢 Хабарландыру жасау"}))
 async def create_ann_start(message: Message, state: FSMContext, session: AsyncSession):
     result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
     user = result.scalar_one_or_none()
@@ -798,7 +798,7 @@ async def ai_triage(callback: CallbackQuery, session: AsyncSession):
 
 # Add worker
 
-@router.message(F.text == "➕ Добавить исполнителя")
+@router.message(F.text.in_({"➕ Добавить исполнителя", "➕ Орындаушы қосу"}))
 async def add_worker_start(message: Message, state: FSMContext, session: AsyncSession):
     result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
     user = result.scalar_one_or_none()

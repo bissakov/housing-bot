@@ -21,6 +21,10 @@ class User(Base):
             "worker_category IS NULL OR worker_category IN ('electrician', 'plumber', 'security')",
             name="ck_users_worker_category",
         ),
+        CheckConstraint(
+            "language IS NULL OR language IN ('kk', 'ru')",
+            name="ck_users_language",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -29,6 +33,8 @@ class User(Base):
     apartment: Mapped[str | None] = mapped_column(String(20), nullable=True)
     role: Mapped[str] = mapped_column(String(20), default="resident", nullable=False)  # resident | worker | dispatcher
     worker_category: Mapped[str | None] = mapped_column(String(20), nullable=True)  # electrician | plumber | security
+    # NULL means that a new user has not made the initial language choice yet.
+    language: Mapped[str | None] = mapped_column(String(2), nullable=True)
     is_approved: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_on_shift: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

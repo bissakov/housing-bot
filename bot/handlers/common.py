@@ -1,6 +1,6 @@
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,7 +12,8 @@ from bot.config import ADMIN_IDS
 from bot.constants import CATEGORY_LABELS, REQUEST_CATEGORIES
 from bot.states import RegistrationStates
 from bot.services.notify import notify_dispatchers
-from bot.keyboards import resident_menu, worker_menu, dispatcher_menu, confirm_delete_keyboard, approval_keyboard, cancel_keyboard, reply_cancel_keyboard
+from bot.i18n import t
+from bot.keyboards import resident_menu, worker_menu, dispatcher_menu, confirm_delete_keyboard, approval_keyboard, cancel_keyboard, reply_cancel_keyboard, language_keyboard
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -22,14 +23,14 @@ PAGE_SIZE = 5
 def get_main_keyboard(user: User):
     from bot.config import is_admin as _is_admin
     if _is_admin(user.telegram_id) and user.role == "dispatcher":
-        return dispatcher_menu()
+        return dispatcher_menu(user.language)
     if user.telegram_id in ADMIN_IDS and not __import__("bot.config", fromlist=["DEV_MODE"]).DEV_MODE:
-        return dispatcher_menu()
+        return dispatcher_menu(user.language)
     if user.role == "dispatcher":
-        return dispatcher_menu()
+        return dispatcher_menu(user.language)
     if user.role == "worker":
-        return worker_menu(user.is_on_shift)
-    return resident_menu()
+        return worker_menu(user.is_on_shift, user.language)
+    return resident_menu(user.language)
 
 
 def _is_dispatcher(user: User) -> bool:
@@ -43,12 +44,12 @@ async def cancel_fsm_cb(callback: CallbackQuery, state: FSMContext, session: Asy
     result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
     u = result.scalar_one_or_none()
     kb = get_main_keyboard(u) if u and u.is_approved else None
-    await callback.message.edit_text("❌ Отмена")
+    await callback.message.edit_text(t("cancel", u.language if u else None))
     if kb:
-        await callback.message.answer("Главное меню", reply_markup=kb)
+        await callback.message.answer(t("main_menu", u.language), reply_markup=kb)
     await callback.answer()
 
-@router.message(F.text == "❌ Отмена")
+@router.message(F.text.in_({"❌ Отмена", "❌ Болдырмау"}))
 async def cancel_fsm_text(message: Message, state: FSMContext, session: AsyncSession):
     cur = await state.get_state()
     if cur is None:
@@ -57,7 +58,7 @@ async def cancel_fsm_text(message: Message, state: FSMContext, session: AsyncSes
     result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
     u = result.scalar_one_or_none()
     kb = get_main_keyboard(u) if u and u.is_approved else None
-    await message.answer("❌ Отменено.", reply_markup=kb)
+    await message.answer(t("cancelled", u.language if u else None), reply_markup=kb)
 
 async def ensure_user(message: Message, session: AsyncSession) -> User:  # type: ignore[no-redef]
     tid = message.from_user.id
@@ -84,6 +85,16 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
         user.is_approved = True
         await session.commit()
 
+    if user.language is None:
+        await state.set_state(RegistrationStates.waiting_language)
+        await message.answer(t("choose_language", "kk"), reply_markup=language_keyboard())
+        return
+
+    await _show_start(message, state, session, user)
+
+
+async def _show_start(message: Message, state: FSMContext, session: AsyncSession, user: User):
+
     # DEV helper hint: /dev switches instantly; /reset does fresh picker. No auto-re-picker on /start for approved users by design.
 
     # Fresh user: offer resident vs worker self-registration before any text prompts
@@ -91,48 +102,79 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
         from bot.keyboards import registration_role_keyboard
         await state.set_state(RegistrationStates.waiting_role)
         await message.answer(
-            "👋 <b>Добро пожаловать в Домовой</b>\n\n"
-            "Кем вы хотите зарегистрироваться?",
+            t("welcome_role", user.language),
             parse_mode="HTML",
-            reply_markup=registration_role_keyboard(),
+            reply_markup=registration_role_keyboard(user.language),
         )
         return
     if not user.is_approved and user.role in ("resident", "worker") and not user.full_name:
         # Half-finished registration (bot restarted, FSM lost): resume at step 1 for either role.
         await state.update_data(reg_role=user.role)
         await message.answer(
-            "👋 <b>Добро пожаловать в Домовой</b>\n\n"
-            "Здесь можно сообщать о проблемах в доме и следить за их решением.\n\n"
-            "Шаг 1 из 2 — введите ваше ФИО:",
+            t("welcome_name", user.language),
             parse_mode="HTML",
-            reply_markup=reply_cancel_keyboard()
+            reply_markup=reply_cancel_keyboard(user.language)
         )
         await state.set_state(RegistrationStates.waiting_name)
         return
 
     if not user.is_approved:
         if user.role == "worker":
-            await message.answer("Ваша заявка на роль исполнителя ожидает подтверждения диспетчера.")
+            await message.answer(t("waiting_worker", user.language))
         else:
-            await message.answer("Ваша регистрация ожидает подтверждения диспетчера. Пожалуйста, ожидайте.")
+            await message.answer(t("waiting_resident", user.language))
         return
 
     kb = get_main_keyboard(user)
-    role_label = {"resident": "Житель", "worker": "Исполнитель", "dispatcher": "Диспетчер"}.get(user.role, user.role)
+    role_label = t(f"role_{user.role}", user.language)
     pending_note = ""
     if _is_dispatcher(user):
         pend = await session.execute(select(User).where(User.is_approved.is_(False)))
         cnt = len(pend.scalars().all())
         if cnt:
-            pending_note = f"\n⏳ Ожидают подтверждения: {cnt} — нажмите «⏳ На подтверждение»"
+            pending_note = f"\n⏳ {t('pending_approval', user.language)}: {cnt}"
     name = escape(user.full_name) if user.full_name else role_label
     await message.answer(
         f"👋 <b>{name}</b>\n"
-        f"Роль: {role_label}{pending_note}\n\n"
-        "Выберите действие в меню ниже.",
+        f"{t('role', user.language)}: {role_label}{pending_note}\n\n"
+        f"{t('main_prompt', user.language)}",
         parse_mode="HTML",
         reply_markup=kb,
     )
+
+
+@router.message(Command("language"))
+async def cmd_language(message: Message, state: FSMContext, session: AsyncSession):
+    await ensure_user(message, session)
+    await state.clear()
+    await message.answer(t("choose_language", "kk"), reply_markup=language_keyboard())
+
+
+@router.callback_query(F.data.startswith("set_language:"))
+async def set_language(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    language = callback.data.split(":", 1)[1]
+    if language not in {"kk", "ru"}:
+        await callback.answer()
+        return
+    result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
+    user = result.scalar_one_or_none()
+    if not user:
+        user = User(
+            telegram_id=callback.from_user.id,
+            username=callback.from_user.username,
+            full_name=callback.from_user.full_name,
+        )
+        session.add(user)
+        await session.flush()
+    was_initial = user.language is None
+    user.language = language
+    await session.commit()
+    await callback.message.edit_text(t("language_changed", language))
+    await callback.answer()
+    if was_initial:
+        await _show_start(callback.message, state, session, user)
+    elif user.is_approved:
+        await callback.message.answer(t("main_menu", language), reply_markup=get_main_keyboard(user))
 
 
 @router.callback_query(F.data.startswith("reg_role:"))
@@ -141,24 +183,25 @@ async def reg_role_choice(callback: CallbackQuery, state: FSMContext, session: A
         await callback.answer()
         return
     choice = callback.data.split(":", 1)[1]
+    result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
+    u = result.scalar_one_or_none()
+    language = u.language if u else None
     if choice == "worker":
-        result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-        u = result.scalar_one_or_none()
         if u:
             u.role = "worker"
             await session.commit()
         # Workers give their name first, same as residents — dispatchers approve a person, not a TG id.
         await state.update_data(reg_role="worker")
-        await callback.message.edit_text("Шаг 1 из 2 — введите ваше ФИО:")
-        await callback.message.answer("Введите ФИО:", reply_markup=reply_cancel_keyboard())
+        await callback.message.edit_text(t("step_name", language))
+        await callback.message.answer(t("enter_name", language), reply_markup=reply_cancel_keyboard(language))
         await state.set_state(RegistrationStates.waiting_name)
         await callback.answer()
         return
     # resident
     await state.update_data(reg_role="resident")
-    await callback.message.edit_text("Шаг 1 из 2 — введите ваше ФИО:")
+    await callback.message.edit_text(t("step_name", language))
     # keep reply keyboard separately
-    await callback.message.answer("Введите ФИО:", reply_markup=reply_cancel_keyboard())
+    await callback.message.answer(t("enter_name", language), reply_markup=reply_cancel_keyboard(language))
     await state.set_state(RegistrationStates.waiting_name)
     await callback.answer()
 
@@ -175,16 +218,17 @@ async def reg_worker_category_choice(callback: CallbackQuery, state: FSMContext,
     tid = callback.from_user.id
     result = await session.execute(select(User).where(User.telegram_id == tid))
     user = result.scalar_one_or_none()
+    language = user.language if user else None
     if not user:
-        await callback.answer("Сначала /start", show_alert=True)
+        await callback.answer(t("start_first", language), show_alert=True)
         await state.clear()
         return
     data = await state.get_data()
     full_name = (data.get("full_name") or user.full_name or "").strip()
     if not full_name:
         # No name collected (stale FSM after a restart) — send them back to step 1.
-        await callback.message.edit_text("Шаг 1 из 2 — введите ваше ФИО:")
-        await callback.message.answer("Введите ФИО:", reply_markup=reply_cancel_keyboard())
+        await callback.message.edit_text(t("step_name", language))
+        await callback.message.answer(t("enter_name", language), reply_markup=reply_cancel_keyboard(language))
         await state.update_data(reg_role="worker", worker_category=cat)
         await state.set_state(RegistrationStates.waiting_name)
         await callback.answer()
@@ -220,21 +264,24 @@ async def reg_worker_category_choice(callback: CallbackQuery, state: FSMContext,
 @router.message(RegistrationStates.waiting_name, F.text)
 async def reg_name(message: Message, state: FSMContext, session: AsyncSession):
     name = message.text.strip()
+    result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
+    user = result.scalar_one_or_none()
+    language = user.language if user else None
     if len(name) < 3:
-        await message.answer("Введите корректное ФИО (минимум 3 символа):")
+        await message.answer(t("invalid_name", language))
         return
     await state.update_data(full_name=name)
     data = await state.get_data()
     if data.get("reg_role") == "worker":
         from bot.keyboards import registration_worker_category_keyboard
         await message.answer(
-            "Шаг 2 из 2 — выберите вашу дисциплину:",
-            reply_markup=registration_worker_category_keyboard(),
+            t("step_worker_category", language),
+            reply_markup=registration_worker_category_keyboard(language),
         )
         await state.set_state(RegistrationStates.waiting_worker_category)
         return
     await message.answer(
-        "Шаг 2 из 2 — введите номер квартиры:", reply_markup=reply_cancel_keyboard()
+        t("step_apartment", language), reply_markup=reply_cancel_keyboard(language)
     )
     await state.set_state(RegistrationStates.waiting_apartment)
 
@@ -249,7 +296,7 @@ async def reg_apartment(message: Message, state: FSMContext, session: AsyncSessi
     result = await session.execute(select(User).where(User.telegram_id == tid))
     user = result.scalar_one_or_none()
     if not user:
-        await message.answer("Ошибка, попробуйте /start заново")
+        await message.answer(t("registration_error", None))
         await state.clear()
         return
     user.full_name = full_name
@@ -258,8 +305,7 @@ async def reg_apartment(message: Message, state: FSMContext, session: AsyncSessi
     await session.commit()
     await state.clear()
     await message.answer(
-        f"Спасибо, {escape(full_name)}! Данные приняты (кв. {escape(apartment)}).\n"
-        f"Ожидайте подтверждения диспетчера — вам придёт уведомление."
+        t("registration_done", user.language, name=escape(full_name), apartment=escape(apartment))
     )
     text = (
         f"🆕 <b>Новый житель на подтверждение</b>\n"
@@ -287,8 +333,12 @@ async def build_announcements(session: AsyncSession, page: int, viewer: User) ->
     q = await session.execute(select(Announcement).order_by(Announcement.created_at.desc()).limit(PAGE_SIZE).offset(page * PAGE_SIZE))
     anns = q.scalars().all()
     if not anns:
-        return "Пока нет объявлений.", InlineKeyboardMarkup(inline_keyboard=[])
-    lines = [f"📢 <b>Объявления</b> — стр {page+1}/{total_pages} (всего {total})\nНажмите 📄 чтобы открыть\n"]
+        return t("no_announcements", viewer.language), InlineKeyboardMarkup(inline_keyboard=[])
+    if viewer.language == "kk":
+        heading = f"📢 <b>{t('announcements', viewer.language)}</b> — {page+1}/{total_pages} (барлығы {total})\nАшу үшін 📄 басыңыз\n"
+    else:
+        heading = f"📢 <b>{t('announcements', viewer.language)}</b> — стр {page+1}/{total_pages} (всего {total})\nНажмите 📄 чтобы открыть\n"
+    lines = [heading]
     for i, ann in enumerate(anns, 1):
         idx = page * PAGE_SIZE + i
         ts = ann.created_at.strftime("%d.%m %H:%M") if ann.created_at else ""
@@ -325,21 +375,21 @@ async def build_announcement_detail(session: AsyncSession, ann_id: int, page: in
     res = await session.execute(select(Announcement).where(Announcement.id == ann_id))
     ann = res.scalar_one_or_none()
     if not ann:
-        return "Объявление не найдено.", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data=f"ann_list:{page}")]])
-    text = f"📢 <b>Объявление #{ann.id}</b>\n{ann.created_at.strftime('%d.%m %H:%M') if ann.created_at else ''}\n\n{escape(ann.text)}"
+        return t("not_found_announcement", viewer.language), InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=t("back", viewer.language), callback_data=f"ann_list:{page}")]])
+    text = f"📢 <b>{t('announcement', viewer.language)} #{ann.id}</b>\n{ann.created_at.strftime('%d.%m %H:%M') if ann.created_at else ''}\n\n{escape(ann.text)}"
     rows: list[list[InlineKeyboardButton]] = []
     if _is_dispatcher(viewer):
         rows.append([InlineKeyboardButton(text="🗑️ Удалить это объявление", callback_data=f"delete_ann:{ann.id}")])
-    rows.append([InlineKeyboardButton(text="◀️ К списку", callback_data=f"ann_list:{page}")])
+    rows.append([InlineKeyboardButton(text=t("back_to_list", viewer.language), callback_data=f"ann_list:{page}")])
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-@router.message(F.text == "📢 Объявления")
+@router.message(F.text.in_({"📢 Объявления", "📢 Хабарландырулар"}))
 async def show_announcements(message: Message, session: AsyncSession):
     result_u = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
     viewer = result_u.scalar_one_or_none()
     if not viewer:
-        await message.answer("Сначала /start")
+        await message.answer(t("start_first", None))
         return
     text, kb = await build_announcements(session, page=0, viewer=viewer)
     await message.answer(text, parse_mode="HTML", reply_markup=kb)

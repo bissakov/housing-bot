@@ -18,6 +18,7 @@ from html import escape
 from bot.auth import is_approved_resident
 from bot.callbacks import ResidentRequestCallback
 from bot.constants import URGENCY_LABELS
+from bot.i18n import category_label, t
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -40,7 +41,7 @@ async def resident_cancel_cb(callback: CallbackQuery, state: FSMContext, session
         await callback.message.answer("Главное меню", reply_markup=kb)
     await callback.answer()
 
-@router.message(F.text == "❌ Отмена")
+@router.message(F.text.in_({"❌ Отмена", "❌ Болдырмау"}))
 async def resident_cancel_text(message: Message, state: FSMContext, session: AsyncSession):
     if await state.get_state() is None:
         return
@@ -147,12 +148,12 @@ async def build_resident_detail(session: AsyncSession, request_id: int, page: in
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-@router.message(F.text == "📝 Создать заявку")
+@router.message(F.text.in_({"📝 Создать заявку", "📝 Өтінім жасау"}))
 async def start_request(message: Message, state: FSMContext, session: AsyncSession):
     result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
     user = result.scalar_one_or_none()
     if not is_approved_resident(user):
-        await message.answer("Сначала завершите регистрацию через /start")
+        await message.answer(t("finish_registration", user.language if user else None))
         return
     # LLM smart intake: if enabled, allow free-form without picking category first
     try:
@@ -162,7 +163,7 @@ async def start_request(message: Message, state: FSMContext, session: AsyncSessi
                 "Опишите проблему одним сообщением (например: \"течёт кран на кухне, лужа на полу\") —\n"
                 "я сам определю категорию и улучшу описание.\n"
                 "Или выберите категорию вручную:",
-                reply_markup=category_keyboard_with_cancel("req_category"),
+                reply_markup=category_keyboard_with_cancel("req_category", user.language),
             )
             await state.set_state(RequestStates.waiting_description)
             # set_data (not update_data) so a cancelled flow leaves no pending_* behind
@@ -171,9 +172,9 @@ async def start_request(message: Message, state: FSMContext, session: AsyncSessi
     except Exception:
         pass
     await message.answer(
-        "📝 <b>Новая заявка</b>\n\nШаг 1 из 2 — выберите категорию:",
+        f"📝 <b>{t('new_request', user.language)}</b>\n\n{t('choose_request_category', user.language)}",
         parse_mode="HTML",
-        reply_markup=category_keyboard_with_cancel("req_category"),
+        reply_markup=category_keyboard_with_cancel("req_category", user.language),
     )
     await state.set_state(RequestStates.waiting_category)
     await state.set_data({"category": None})
@@ -261,8 +262,10 @@ def _suggestion_keyboard(can_recategorize: bool) -> InlineKeyboardMarkup:
 @router.callback_query(F.data.startswith("req_category:"))
 async def choose_category(callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot):
     category = callback.data.split(":")[1]
+    user = await _load_resident(session, callback.from_user.id)
+    language = user.language if user else None
     if category not in CATEGORY_LABELS:
-        await callback.answer("Неизвестная категория")
+        await callback.answer(t("unknown_category", language))
         return
     data = await state.get_data()
     pending_raw = data.get("pending_raw")
@@ -270,7 +273,6 @@ async def choose_category(callback: CallbackQuery, state: FSMContext, session: A
     # The description was already collected (LLM outage fallback, or "другая
     # категория" from the suggestion card): file it now instead of re-asking.
     if pending_raw:
-        user = await _load_resident(session, callback.from_user.id)
         if not user:
             await callback.answer("Ошибка пользователя", show_alert=True)
             return
@@ -294,10 +296,10 @@ async def choose_category(callback: CallbackQuery, state: FSMContext, session: A
 
     await state.update_data(category=category, llm_intake=False)
     await callback.message.edit_text(
-        f"📝 <b>Новая заявка</b>\n\n"
-        f"Шаг 2 из 2 — опишите проблему\n"
-        f"Категория: {CATEGORY_LABELS[category]}\n\n"
-        "Укажите, что произошло и где именно. Например: «На кухне под мойкой течёт труба».",
+        f"📝 <b>{t('new_request', language)}</b>\n\n"
+        f"{t('describe_problem', language)}\n"
+        f"{t('category', language)}: {category_label(category, language)}\n\n"
+        f"{t('description_hint', language)}",
         parse_mode="HTML",
         reply_markup=cancel_keyboard(),
     )
@@ -309,6 +311,8 @@ async def choose_category(callback: CallbackQuery, state: FSMContext, session: A
 async def input_description(message: Message, state: FSMContext, session: AsyncSession, bot: Bot):
     data = await state.get_data()
     category = data.get("category")
+    user = await _load_resident(session, message.from_user.id)
+    language = user.language if user else None
     description_raw = message.text.strip()
     if len(description_raw) < MIN_DESCRIPTION_LEN:
         await message.answer(
@@ -325,7 +329,7 @@ async def input_description(message: Message, state: FSMContext, session: AsyncS
         if not category:
             await message.answer(
                 "Не удалось определить категорию автоматически. Выберите вручную:",
-                reply_markup=category_keyboard_with_cancel("req_category"),
+                reply_markup=category_keyboard_with_cancel("req_category", language),
             )
             await state.update_data(pending_raw=description_raw, pending_enriched=None, pending_meta=None)
             await state.set_state(RequestStates.waiting_category)
@@ -687,7 +691,7 @@ async def confirm_ai_suggestion(callback: CallbackQuery, state: FSMContext, sess
         )
     await callback.answer()
 
-@router.message(F.text == "📋 Мои заявки")
+@router.message(F.text.in_({"📋 Мои заявки", "📋 Менің өтінімдерім"}))
 async def my_requests(message: Message, session: AsyncSession):
     result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
     user = result.scalar_one_or_none()

@@ -1,74 +1,93 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 from bot.constants import CATEGORY_LABELS, STATUS_LABELS
+from bot.i18n import DEFAULT_LANGUAGE, category_label, normalize_language, t
 
 
-def category_keyboard(prefix: str = "req_category") -> InlineKeyboardMarkup:
+def language_keyboard() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    for cat, label in CATEGORY_LABELS.items():
-        b.button(text=label, callback_data=f"{prefix}:{cat}")
+    b.button(text="🇰🇿 Қазақша", callback_data="set_language:kk")
+    b.button(text="🇷🇺 Русский", callback_data="set_language:ru")
     b.adjust(1)
     return b.as_markup()
 
 
-def resident_menu() -> ReplyKeyboardMarkup:
+def category_keyboard(prefix: str = "req_category", language: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    for cat in CATEGORY_LABELS:
+        b.button(text=category_label(cat, language), callback_data=f"{prefix}:{cat}")
+    b.adjust(1)
+    return b.as_markup()
+
+
+def resident_menu(language: str = DEFAULT_LANGUAGE) -> ReplyKeyboardMarkup:
+    language = normalize_language(language)
     b = ReplyKeyboardBuilder()
-    b.button(text="📝 Создать заявку")
-    b.button(text="📋 Мои заявки")
-    b.button(text="📢 Объявления")
+    labels = {
+        "kk": ("📝 Өтінім жасау", "📋 Менің өтінімдерім", "📢 Хабарландырулар", "Әрекетті таңдаңыз"),
+        "ru": ("📝 Создать заявку", "📋 Мои заявки", "📢 Объявления", "Выберите действие"),
+    }[language]
+    for label in labels[:3]:
+        b.button(text=label)
     b.adjust(2, 1)
     return b.as_markup(
         resize_keyboard=True,
         is_persistent=True,
-        input_field_placeholder="Выберите действие",
+        input_field_placeholder=labels[3],
     )
 
 
-def worker_menu(is_on_shift: bool) -> ReplyKeyboardMarkup:
+def worker_menu(is_on_shift: bool, language: str = DEFAULT_LANGUAGE) -> ReplyKeyboardMarkup:
+    language = normalize_language(language)
     b = ReplyKeyboardBuilder()
-    shift_text = "⏸️ Уйти со смены" if is_on_shift else "▶️ На смену"
-    b.button(text=shift_text)
-    b.button(text="📋 Доступные заявки")
-    b.button(text="🔧 Мои заявки")
-    b.button(text="📢 Объявления")
+    labels = {
+        "kk": (("⏸️ Ауысымнан шығу" if is_on_shift else "▶️ Ауысымға шығу"), "📋 Қолжетімді өтінімдер", "🔧 Менің өтінімдерім", "📢 Хабарландырулар", "Орындаушы мәзірі"),
+        "ru": (("⏸️ Уйти со смены" if is_on_shift else "▶️ На смену"), "📋 Доступные заявки", "🔧 Мои заявки", "📢 Объявления", "Меню исполнителя"),
+    }[language]
+    for label in labels[:4]:
+        b.button(text=label)
     b.adjust(2, 2)
     return b.as_markup(
         resize_keyboard=True,
         is_persistent=True,
-        input_field_placeholder="Меню исполнителя",
+        input_field_placeholder=labels[4],
     )
 
 
-def dispatcher_menu() -> ReplyKeyboardMarkup:
+def dispatcher_menu(language: str = DEFAULT_LANGUAGE) -> ReplyKeyboardMarkup:
+    language = normalize_language(language)
     b = ReplyKeyboardBuilder()
-    b.button(text="📊 Сводка")
-    b.button(text="📋 Все заявки")
-    b.button(text="⏳ На подтверждение")
-    b.button(text="➕ Добавить исполнителя")
-    b.button(text="📢 Создать объявление")
-    b.button(text="📢 Объявления")
+    labels = {
+        "kk": ("📊 Жиынтық", "📋 Барлық өтінімдер", "⏳ Растауға", "➕ Орындаушы қосу", "📢 Хабарландыру жасау", "📢 Хабарландырулар", "Диспетчер тақтасы"),
+        "ru": ("📊 Сводка", "📋 Все заявки", "⏳ На подтверждение", "➕ Добавить исполнителя", "📢 Создать объявление", "📢 Объявления", "Панель диспетчера"),
+    }[language]
+    for label in labels[:6]:
+        b.button(text=label)
     b.adjust(2, 2, 2)
     return b.as_markup(
         resize_keyboard=True,
         is_persistent=True,
-        input_field_placeholder="Панель диспетчера",
+        input_field_placeholder=labels[6],
     )
 
 
-def registration_role_keyboard() -> InlineKeyboardMarkup:
+def registration_role_keyboard(language: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
+    language = normalize_language(language)
     b = InlineKeyboardBuilder()
-    b.button(text="🏠 Я житель", callback_data="reg_role:resident")
-    b.button(text="🔧 Я исполнитель", callback_data="reg_role:worker")
-    b.button(text="❌ Отмена", callback_data="cancel_fsm")
+    resident = "🏠 Мен тұрғынмын" if language == "kk" else "🏠 Я житель"
+    worker = "🔧 Мен орындаушымын" if language == "kk" else "🔧 Я исполнитель"
+    b.button(text=resident, callback_data="reg_role:resident")
+    b.button(text=worker, callback_data="reg_role:worker")
+    b.button(text=t("cancel", language), callback_data="cancel_fsm")
     b.adjust(1)
     return b.as_markup()
 
 
-def registration_worker_category_keyboard() -> InlineKeyboardMarkup:
+def registration_worker_category_keyboard(language: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    for cat, label in CATEGORY_LABELS.items():
-        b.button(text=label, callback_data=f"reg_worker_category:{cat}")
-    b.button(text="❌ Отмена", callback_data="cancel_fsm")
+    for cat in CATEGORY_LABELS:
+        b.button(text=category_label(cat, language), callback_data=f"reg_worker_category:{cat}")
+    b.button(text=t("cancel", language), callback_data="cancel_fsm")
     b.adjust(1)
     return b.as_markup()
 
@@ -147,16 +166,16 @@ def cancel_keyboard() -> InlineKeyboardMarkup:
     b.button(text="❌ Отмена", callback_data="cancel_fsm")
     return b.as_markup()
 
-def reply_cancel_keyboard() -> ReplyKeyboardMarkup:
+def reply_cancel_keyboard(language: str = DEFAULT_LANGUAGE) -> ReplyKeyboardMarkup:
     b = ReplyKeyboardBuilder()
-    b.button(text="❌ Отмена")
+    b.button(text=t("cancel", language))
     return b.as_markup(resize_keyboard=True, one_time_keyboard=True)
 
-def category_keyboard_with_cancel(prefix: str = "req_category") -> InlineKeyboardMarkup:
+def category_keyboard_with_cancel(prefix: str = "req_category", language: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    for cat, label in CATEGORY_LABELS.items():
-        b.button(text=label, callback_data=f"{prefix}:{cat}")
-    b.button(text="❌ Отмена", callback_data="cancel_fsm")
+    for cat in CATEGORY_LABELS:
+        b.button(text=category_label(cat, language), callback_data=f"{prefix}:{cat}")
+    b.button(text=t("cancel", language), callback_data="cancel_fsm")
     b.adjust(1)
     return b.as_markup()
 

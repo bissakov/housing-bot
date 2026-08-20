@@ -10,6 +10,9 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 # after initial schema. create_all() only creates missing tables, not columns,
 # so we ALTER existing tables to keep older bot.db files compatible.
 _ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
+    "users": [
+        ("language", "VARCHAR(2)"),
+    ],
     "requests": [
         ("urgency", "VARCHAR(10)"),
         ("raw_description", "TEXT"),

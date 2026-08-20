@@ -87,6 +87,7 @@ async def create_user(session, telegram_id=1001, role="resident", is_approved=Tr
         is_on_shift=is_on_shift,
         full_name=full_name,
         apartment=apartment,
+        language="ru",
     )
     session.add(u)
     await session.flush()

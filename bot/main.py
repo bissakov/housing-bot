@@ -55,7 +55,10 @@ async def main():
 
     # Register the command menu shown in Telegram clients.
     # Keep in sync with the actual slash handlers in bot/handlers/*.
-    commands = [BotCommand(command="start", description="Регистрация и главное меню")]
+    commands = [
+        BotCommand(command="start", description="Тіркелу / Регистрация"),
+        BotCommand(command="language", description="Тілді өзгерту / Изменить язык"),
+    ]
     if DEV_MODE:
         commands.append(BotCommand(command="dev", description="Быстро сменить роль (только для разработки и отладки)"))
         commands.append(BotCommand(command="reset", description="Удалить профиль и заново зарегистрироваться (только для разработки и отладки)"))

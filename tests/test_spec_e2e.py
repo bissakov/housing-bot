@@ -142,6 +142,8 @@ async def test_common_registration_flow(session):
     msg0.answer = AsyncMock()
     state = fsm_for(user_id=tg_id, chat_id=tg_id)
     await cmd_start(msg0, state, session)
+    from bot.handlers.common import set_language
+    await set_language(make_callback("set_language:ru", tg_id=tg_id), state, session)
     await session.commit()
     # send name
     msg1 = make_message("Иванов Иван", tg_id=tg_id)
@@ -330,6 +332,8 @@ async def test_worker_registration_requires_name(session, fake_bot):
 
     msg0 = make_message("/start", tg_id=tg_id)
     await cmd_start(msg0, state, session)
+    from bot.handlers.common import set_language
+    await set_language(make_callback("set_language:ru", tg_id=tg_id), state, session)
     await session.commit()
 
     # pick "Исполнитель" -> must land on the name step, not the category picker

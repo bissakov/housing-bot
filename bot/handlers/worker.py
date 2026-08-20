@@ -117,7 +117,7 @@ async def build_worker_mine(session: AsyncSession, user: User, page: int) -> tup
     return text, InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
 
-@router.message(F.text.in_({"▶️ На смену", "⏸️ Уйти со смены"}))
+@router.message(F.text.in_({"▶️ На смену", "⏸️ Уйти со смены", "▶️ Ауысымға шығу", "⏸️ Ауысымнан шығу"}))
 async def toggle_shift(message: Message, session: AsyncSession):
     result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
     user = result.scalar_one_or_none()
@@ -127,10 +127,10 @@ async def toggle_shift(message: Message, session: AsyncSession):
     user.is_on_shift = not user.is_on_shift
     await session.commit()
     status = "🟢 Вы на смене. Новые заявки будут доступны в меню." if user.is_on_shift else "⚪ Смена завершена. Уведомления о новых заявках приостановлены."
-    await message.answer(status, reply_markup=worker_menu(user.is_on_shift))
+    await message.answer(status, reply_markup=worker_menu(user.is_on_shift, user.language))
 
 
-@router.message(F.text == "📋 Доступные заявки")
+@router.message(F.text.in_({"📋 Доступные заявки", "📋 Қолжетімді өтінімдер"}))
 async def available_requests(message: Message, session: AsyncSession):
     result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
     user = result.scalar_one_or_none()
@@ -144,7 +144,7 @@ async def available_requests(message: Message, session: AsyncSession):
     await message.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
-@router.message(F.text == "🔧 Мои заявки")
+@router.message(F.text.in_({"🔧 Мои заявки", "🔧 Менің өтінімдерім"}))
 async def my_worker_requests(message: Message, session: AsyncSession):
     result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
     user = result.scalar_one_or_none()

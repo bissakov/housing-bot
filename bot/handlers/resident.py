@@ -27,11 +27,7 @@ from bot.callbacks import ResidentRequestCallback
 from bot.constants import KAZAKHDOMOFON_TEMPLATES, URGENCY_LABELS
 from bot.i18n import category_label, t, text_variants
 from bot.timezone import format_local, utc_now
-from bot.services.request_routing import (
-    APARTMENT_PAID_NOTICE,
-    CLEANING_NOTICE,
-    next_cleaning_dispatch,
-)
+from bot.services.request_routing import next_cleaning_dispatch
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -692,10 +688,10 @@ async def choose_service_area(
         return
     await state.set_state(RequestStates.waiting_description)
     prompt = (
-        APARTMENT_PAID_NOTICE
-        + "\n\nТеперь опишите требуемую работу и точное место."
+        t("apartment_paid_notice", user.language)
+        + f"\n\n{t('describe_apartment_work', user.language)}"
         if area == "apartment"
-        else "Опишите проблему в МОП и укажите точное место."
+        else t("describe_common_problem", user.language)
     )
     await callback.message.edit_text(
         prompt, parse_mode="HTML", reply_markup=cancel_keyboard(user.language)
@@ -797,7 +793,7 @@ async def input_request_media(
         return
     dispatch_after = next_cleaning_dispatch(utc_now())
     if dispatch_after is not None:
-        await message.answer(CLEANING_NOTICE)
+        await message.answer(t("cleaning_closed_notice", user.language))
     await _create_direct_request(
         message,
         state,

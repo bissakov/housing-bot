@@ -1,7 +1,10 @@
 from datetime import datetime, timezone
 
+import pytest
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.memory import MemoryStorage
 from sqlalchemy import select
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from bot.auth import is_dispatcher
 from bot.models import RequestAttachment, User
@@ -13,6 +16,7 @@ from bot.services.requests import (
     create_request,
     reject_request,
 )
+from tests.conftest import make_callback, make_message
 
 
 def _utc(year, month, day, hour, minute=0):
@@ -30,6 +34,84 @@ def test_cleaning_schedule_releases_at_next_opening():
     assert next_cleaning_dispatch(_utc(2026, 8, 24, 2)) == _utc(2026, 8, 24, 3)
     assert next_cleaning_dispatch(_utc(2026, 8, 29, 8)) == _utc(2026, 8, 31, 3)
     assert next_cleaning_dispatch(_utc(2026, 8, 30, 5)) == _utc(2026, 8, 31, 3)
+
+
+@pytest.mark.parametrize(
+    ("language", "expected", "unexpected"),
+    [
+        ("kk", "Құрметті тұрғындар", "Уважаемые жители"),
+        ("ru", "Уважаемые жители", "Құрметті тұрғындар"),
+    ],
+)
+async def test_apartment_paid_notice_follows_resident_language(
+    session, fake_bot, language, expected, unexpected
+):
+    from bot.handlers.resident import choose_service_area
+
+    telegram_id = 100 if language == "kk" else 101
+    session.add(User(
+        telegram_id=telegram_id,
+        role="resident",
+        is_approved=True,
+        language=language,
+    ))
+    await session.flush()
+    state = FSMContext(
+        storage=MemoryStorage(), key=(123456, telegram_id, telegram_id)
+    )
+    await state.set_data({"category": "plumber"})
+    callback = make_callback("req_area:apartment", tg_id=telegram_id)
+
+    await choose_service_area(callback, state, session, fake_bot)
+
+    notice = callback.message.edit_text.await_args.args[0]
+    assert expected in notice
+    assert unexpected not in notice
+
+
+@pytest.mark.parametrize(
+    ("language", "expected", "unexpected"),
+    [
+        ("kk", "Қазіргі уақытта", "В данный момент"),
+        ("ru", "В данный момент", "Қазіргі уақытта"),
+    ],
+)
+async def test_after_hours_cleaning_notice_follows_resident_language(
+    session, fake_bot, language, expected, unexpected
+):
+    from bot.handlers.resident import input_request_media
+
+    telegram_id = 102 if language == "kk" else 103
+    session.add(User(
+        telegram_id=telegram_id,
+        role="resident",
+        is_approved=True,
+        language=language,
+    ))
+    await session.flush()
+    state = FSMContext(
+        storage=MemoryStorage(), key=(123456, telegram_id, telegram_id)
+    )
+    await state.set_data({"category": "cleaning"})
+    message = make_message(tg_id=telegram_id)
+    message.photo = [MagicMock(file_id="file", file_unique_id="unique")]
+    message.video = None
+    message.caption = "Кіреберістің бірінші қабатындағы еден лас"
+
+    with (
+        patch(
+            "bot.handlers.resident.next_cleaning_dispatch",
+            return_value=_utc(2026, 8, 25, 3),
+        ),
+        patch(
+            "bot.handlers.resident._create_direct_request", new=AsyncMock()
+        ),
+    ):
+        await input_request_media(message, state, session, fake_bot)
+
+    notice = message.answer.await_args.args[0]
+    assert expected in notice
+    assert unexpected not in notice
 
 
 async def test_kazakhdomofon_is_generic_work_after_chairman_approval(session):

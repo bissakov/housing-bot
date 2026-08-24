@@ -81,6 +81,22 @@ def test_schedule_messages_are_localized():
     assert t("schedule_hours_added", "kk") == "✅ Жұмыс уақыты қосылды."
 
 
+def test_service_notices_use_only_the_selected_language():
+    apartment_kk = t("apartment_paid_notice", "kk")
+    apartment_ru = t("apartment_paid_notice", "ru")
+    cleaning_kk = t("cleaning_closed_notice", "kk")
+    cleaning_ru = t("cleaning_closed_notice", "ru")
+
+    assert "Құрметті тұрғындар" in apartment_kk
+    assert "Уважаемые жители" not in apartment_kk
+    assert "Уважаемые жители" in apartment_ru
+    assert "Құрметті тұрғындар" not in apartment_ru
+    assert "Қазіргі уақытта" in cleaning_kk
+    assert "В данный момент" not in cleaning_kk
+    assert "В данный момент" in cleaning_ru
+    assert "Қазіргі уақытта" not in cleaning_ru
+
+
 def test_cancel_keyboard_follows_explicit_user_language():
     assert reply_cancel_keyboard("ru").keyboard[0][0].text == "❌ Отмена"
     assert reply_cancel_keyboard("kk").keyboard[0][0].text == "❌ Болдырмау"

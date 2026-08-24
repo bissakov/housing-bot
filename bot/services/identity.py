@@ -1,6 +1,6 @@
 """Resolve the business actor behind an incoming Telegram update."""
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.config import DEV_MODE
@@ -20,6 +20,26 @@ async def get_actor(session: AsyncSession, telegram_id: int) -> User | None:
             return persona
     return await session.scalar(
         select(User).where(User.telegram_id == telegram_id)
+    )
+
+
+async def sync_persona_languages(
+    session: AsyncSession, controller_telegram_id: int, language: str
+) -> None:
+    """Keep every DEV persona on its controller's account-wide locale."""
+    if not DEV_MODE:
+        return
+    await session.execute(
+        update(User)
+        .where(
+            User.id.in_(
+                select(DevPersona.user_id).where(
+                    DevPersona.controller_telegram_id == controller_telegram_id
+                )
+            )
+        )
+        .values(language=language)
+        .execution_options(synchronize_session=False)
     )
 
 

@@ -70,13 +70,13 @@ starting at `8800000000`, so they are easy to distinguish from real users.
 
 Set `DEV_MODE=true`, restart the bot, and send `/dev` to select a stable test
 persona. The available personas cover resident owner and tenant, every worker
-category, dispatcher, and chairman. They use Kazakh-facing names and `kk` as
-their default language.
+category, dispatcher, and chairman. They use stable demo names and inherit the
+developer's selected interface language.
 
 A persona is created only on first use and then reused. Switching personas does
 not rewrite the developer's profile or the role attached to historical
 requests. Notifications addressed to the selected persona are delivered to the
-developer controlling it. **Өз профилім** returns to the ordinary profile, and
+developer controlling it. **My profile** returns to the ordinary profile, and
 the cleanup button clears the selected persona's requests and schedule without
 deleting the persona itself.
 

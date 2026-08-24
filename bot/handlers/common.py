@@ -12,7 +12,7 @@ from bot.auth import is_administrator, is_dispatcher
 from bot.config import ADMIN_IDS
 from bot.constants import CATEGORY_LABELS, REQUEST_CATEGORIES
 from bot.states import RegistrationStates
-from bot.services.identity import get_actor
+from bot.services.identity import get_actor, sync_persona_languages
 from bot.services.notify import notify_dispatchers, send_to_user
 from bot.i18n import SUPPORTED_LANGUAGES, t, text_variants
 from bot.keyboards import (
@@ -183,6 +183,9 @@ async def set_language(callback: CallbackQuery, state: FSMContext, session: Asyn
         await callback.answer()
         return
     user = await get_actor(session, callback.from_user.id)
+    controller = await session.scalar(
+        select(User).where(User.telegram_id == callback.from_user.id)
+    )
     if not user:
         user = User(
             telegram_id=callback.from_user.id,
@@ -190,8 +193,16 @@ async def set_language(callback: CallbackQuery, state: FSMContext, session: Asyn
         )
         session.add(user)
         await session.flush()
+        controller = user
     was_initial = user.language is None
     user.language = language
+    # A development persona is an alternate role for the same Telegram user,
+    # so language remains an account-wide preference while impersonating it.
+    if controller is not None:
+        controller.language = language
+        await sync_persona_languages(
+            session, callback.from_user.id, language
+        )
     await session.commit()
     await callback.message.edit_text(t("language_changed", language))
     await callback.answer()

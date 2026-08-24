@@ -1,7 +1,7 @@
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
-from sqlalchemy import select, func
+from sqlalchemy import literal, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from html import escape
@@ -794,40 +794,124 @@ async def cancel_assign(callback: CallbackQuery):
 PEND_PAGE_SIZE = 5
 
 async def build_pending_list(
-    session: AsyncSession, page: int, language: str | None = None
+    session: AsyncSession,
+    page: int,
+    language: str | None = None,
+    *,
+    include_request_approvals: bool = False,
 ) -> tuple[str, InlineKeyboardMarkup]:
     pending_filter = (
         User.is_approved.is_(False),
         ~((User.role == "resident") & (User.resident_subrole == "tenant")),
     )
+    registrations = select(
+        literal("registration").label("kind"),
+        User.id.label("item_id"),
+        User.created_at.label("created_at"),
+    ).where(*pending_filter)
+    if include_request_approvals:
+        request_approvals = select(
+            literal("request").label("kind"),
+            Request.id.label("item_id"),
+            Request.created_at.label("created_at"),
+        ).where(
+            Request.status == "new",
+            Request.approval_status == "pending",
+        )
+        pending_items = registrations.union_all(request_approvals).subquery()
+    else:
+        pending_items = registrations.subquery()
     total_res = await session.execute(
-        select(func.count()).select_from(User).where(*pending_filter)
+        select(func.count()).select_from(pending_items)
     )
     total = total_res.scalar() or 0
     total_pages = (total + PEND_PAGE_SIZE - 1) // PEND_PAGE_SIZE if total else 1
     page = max(0, min(page, total_pages - 1))
-    res = await session.execute(select(User).where(*pending_filter).order_by(User.created_at.desc()).limit(PEND_PAGE_SIZE).offset(page * PEND_PAGE_SIZE))
-    pending = res.scalars().all()
-    if not pending:
-        return "✅ Нет ожидающих подтверждения.", InlineKeyboardMarkup(inline_keyboard=[])
-    lines = [f"⏳ <b>На подтверждение</b> — стр {page+1}/{total_pages} (всего {total})\nНажмите 📄 чтобы открыть карточку\n"]
-    for u in pending:
-        public_role = role_label(u.role, language)
-        worker_category = (
-            f"({category_label(u.worker_category, language)})"
-            if u.worker_category else ""
+    result = await session.execute(
+        select(
+            pending_items.c.kind,
+            pending_items.c.item_id,
+            pending_items.c.created_at,
         )
-        lines.append(
-            f"<b>#{u.id}</b> {public_role} • TG <code>{u.telegram_id}</code> • "
-            f"{format_local(u.created_at, '%d.%m %H:%M', '')}\n"
-            f"{escape(u.full_name or '—')} кв.{escape(u.apartment or '—')} "
-            f"{worker_category}\n"
+        .order_by(pending_items.c.created_at.desc(), pending_items.c.item_id.desc())
+        .limit(PEND_PAGE_SIZE)
+        .offset(page * PEND_PAGE_SIZE)
+    )
+    items = result.all()
+    if not items:
+        return t(
+            "pending_items_empty", language
+        ), InlineKeyboardMarkup(inline_keyboard=[])
+
+    user_ids = [item.item_id for item in items if item.kind == "registration"]
+    request_ids = [item.item_id for item in items if item.kind == "request"]
+    users: dict[int, User] = {}
+    requests: dict[int, Request] = {}
+    if user_ids:
+        user_result = await session.execute(select(User).where(User.id.in_(user_ids)))
+        users = {user.id: user for user in user_result.scalars()}
+    if request_ids:
+        request_result = await session.execute(
+            select(Request)
+            .options(selectinload(Request.resident))
+            .where(Request.id.in_(request_ids))
         )
+        requests = {request.id: request for request in request_result.scalars()}
+
+    lines = [t(
+        "pending_items_heading",
+        language,
+        page=page + 1,
+        pages=total_pages,
+        total=total,
+    )]
+    for item in items:
+        if item.kind == "registration":
+            user = users[item.item_id]
+            public_role = role_label(user.role, language)
+            worker_category = (
+                f" ({category_label(user.worker_category, language)})"
+                if user.worker_category else ""
+            )
+            lines.append(t(
+                "pending_registration_item",
+                language,
+                id=user.id,
+                role=f"{public_role}{worker_category}",
+                created=format_local(user.created_at, "%d.%m %H:%M", ""),
+                name=escape(user.full_name or "—"),
+                apartment=escape(user.apartment or "—"),
+            ))
+        else:
+            request = requests[item.item_id]
+            resident = request.resident
+            description = escape(request.description.strip().replace("\n", " "))
+            if len(description) > 80:
+                description = description[:80] + "…"
+            lines.append(t(
+                "pending_request_item",
+                language,
+                id=request.id,
+                created=format_local(request.created_at, "%d.%m %H:%M", ""),
+                resident=escape(resident.full_name or "—") if resident else "—",
+                apartment=escape(resident.apartment or "—") if resident else "—",
+                description=description,
+            ))
     text = "\n".join(lines)
     rows: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
-    for u in pending:
-        row.append(InlineKeyboardButton(text=f"📄 #{u.id}", callback_data=f"pend_view:{u.id}:{page}"))
+    for item in items:
+        if item.kind == "registration":
+            button = InlineKeyboardButton(
+                text=f"👤 #{item.item_id}",
+                callback_data=f"pend_view:{item.item_id}:{page}",
+            )
+        else:
+            button = InlineKeyboardButton(
+                text=f"📹 #{item.item_id}",
+                callback_data=f"pend_req_view:{item.item_id}:{page}",
+            )
+        row.append(button)
         if len(row) == 2:
             rows.append(row)
             row = []
@@ -852,7 +936,7 @@ async def build_pending_detail(
         return "Не найден.", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data=f"pend_list:{page}")]])
     public_role = role_label(u.role, language)
     text = (
-        f"⏳ {public_role} на подтверждение\n"
+        f"{t('pending_registration_detail', language, role=public_role)}\n"
         f"ID: {u.id} | TG: <code>{u.telegram_id}</code>\n"
         f"Имя: {escape(u.full_name or '—')} | Кв: {escape(u.apartment or '—')}\n"
         f"Категория: {category_label(u.worker_category, language) or '—'}\n"
@@ -865,16 +949,29 @@ async def build_pending_detail(
     ])
     return text, kb
 
-# --- Pending approvals (spec: resident needs dispatcher approval) ---
+# --- Action queue: registrations plus chairman-only request approvals ---
 
-@router.message(F.text.in_(text_variants("pending_workers")))
+@router.message(F.text.in_(
+    text_variants("pending_workers")
+    | {
+        "⏳ На подтверждение",
+        "⏳ Растауға",
+        "👤 Новые регистрации",
+        "👤 Жаңа тіркеулер",
+    }
+))
 async def pending_approvals(message: Message, session: AsyncSession):
     result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
     viewer = result.scalar_one_or_none()
     if not viewer or not _is_dispatcher(viewer):
         await message.answer("Только для диспетчеров.")
         return
-    text, kb = await build_pending_list(session, page=0, language=viewer.language)
+    text, kb = await build_pending_list(
+        session,
+        page=0,
+        language=viewer.language,
+        include_request_approvals=is_administrator(viewer),
+    )
     await message.answer(text, parse_mode="HTML", reply_markup=kb)
 
 @router.callback_query(F.data.startswith("pend_list:"))
@@ -885,7 +982,12 @@ async def pend_list(callback: CallbackQuery, session: AsyncSession):
     if not viewer or not _is_dispatcher(viewer):
         await callback.answer("Нет прав", show_alert=True)
         return
-    text, kb = await build_pending_list(session, page, language=viewer.language)
+    text, kb = await build_pending_list(
+        session,
+        page,
+        language=viewer.language,
+        include_request_approvals=is_administrator(viewer),
+    )
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
     await callback.answer()
 
@@ -903,6 +1005,38 @@ async def pend_view(callback: CallbackQuery, session: AsyncSession):
         session, uid, page, language=viewer.language
     )
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("pend_req_view:"))
+async def pending_request_view(
+    callback: CallbackQuery, session: AsyncSession, bot: Bot
+):
+    parts = callback.data.split(":")
+    request_id = int(parts[1])
+    page = int(parts[2]) if len(parts) > 2 else 0
+    result = await session.execute(
+        select(User).where(User.telegram_id == callback.from_user.id)
+    )
+    viewer = result.scalar_one_or_none()
+    if not is_administrator(viewer):
+        await callback.answer("Только для председателя", show_alert=True)
+        return
+    text, kb = await build_request_detail(
+        session, request_id, page, can_delete=True
+    )
+    rows = [list(row) for row in kb.inline_keyboard]
+    rows[-1] = [InlineKeyboardButton(
+        text="◀️ К списку", callback_data=f"pend_list:{page}"
+    )]
+    await callback.message.edit_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    await _send_request_attachments(
+        bot, session, callback.from_user.id, request_id
+    )
     await callback.answer()
 
 

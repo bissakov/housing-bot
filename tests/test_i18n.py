@@ -8,6 +8,7 @@ from bot.i18n import SUPPORTED_LANGUAGES, TEXTS, category_label, normalize_langu
 from bot.keyboards import cancel_keyboard, dispatcher_menu, resident_menu, worker_menu
 from bot.keyboards import reply_cancel_keyboard
 from bot.models import User
+from bot.services.requests import create_request
 from tests.conftest import make_callback, make_message
 
 
@@ -57,6 +58,9 @@ def test_each_menu_uses_only_the_requested_language():
     resident_texts = {button.text for row in resident_menu("kk").keyboard for button in row}
     worker_texts = {button.text for row in worker_menu(False, "ru").keyboard for button in row}
     dispatcher_texts = {button.text for row in dispatcher_menu("kk").keyboard for button in row}
+    dispatcher_texts_ru = {
+        button.text for row in dispatcher_menu("ru").keyboard for button in row
+    }
 
     assert "📝 Өтінім жасау" in resident_texts
     assert "📝 Создать заявку" not in resident_texts
@@ -64,6 +68,10 @@ def test_each_menu_uses_only_the_requested_language():
     assert "▶️ Ауысымға шығу" not in worker_texts
     assert "📊 Есептер" in dispatcher_texts
     assert "📊 Сводка" not in dispatcher_texts
+    assert "⏳ Шешім күтуде" in dispatcher_texts
+    assert "⏳ Растауға" not in dispatcher_texts
+    assert "⏳ Требуют решения" in dispatcher_texts_ru
+    assert "⏳ На подтверждение" not in dispatcher_texts_ru
 
 
 def test_schedule_messages_are_localized():
@@ -106,3 +114,32 @@ async def test_language_callback_saves_preference_and_continues_registration(ses
     assert user.language == "ru"
     assert "Язык изменён" in callback.message.edit_text.call_args.args[0]
     assert "Кем вы хотите" in callback.message.answer.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_chairman_start_counts_pending_request_approvals(session):
+    chairman = User(
+        telegram_id=9003,
+        role="administrator",
+        is_approved=True,
+        language="ru",
+        full_name="Председатель",
+    )
+    resident = User(
+        telegram_id=9004,
+        role="resident",
+        is_approved=True,
+        language="ru",
+        full_name="Житель",
+        apartment="44",
+    )
+    session.add_all([chairman, resident])
+    await session.flush()
+    await create_request(
+        session, resident.id, "kazakhdomofon", "Добавление Face ID"
+    )
+    message = make_message("/start", tg_id=chairman.telegram_id)
+
+    await cmd_start(message, make_state(chairman.telegram_id), session)
+
+    assert "требуют решения: 1" in message.answer.call_args.args[0]

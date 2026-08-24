@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from html import escape
 import logging
 
-from bot.models import User
+from bot.models import Request, User
 from bot.auth import is_administrator, is_dispatcher
 from bot.config import ADMIN_IDS
 from bot.constants import CATEGORY_LABELS, REQUEST_CATEGORIES
@@ -146,11 +146,21 @@ async def _show_start(message: Message, state: FSMContext, session: AsyncSession
     role_label = t(f"role_{user.role}", user.language)
     pending_note = ""
     if _is_dispatcher(user):
-        pend = await session.execute(select(User).where(
-            User.is_approved.is_(False),
-            ~((User.role == "resident") & (User.resident_subrole == "tenant")),
-        ))
-        cnt = len(pend.scalars().all())
+        pending_registrations = await session.execute(
+            select(func.count()).select_from(User).where(
+                User.is_approved.is_(False),
+                ~((User.role == "resident") & (User.resident_subrole == "tenant")),
+            )
+        )
+        cnt = pending_registrations.scalar() or 0
+        if is_administrator(user):
+            pending_requests = await session.execute(
+                select(func.count()).select_from(Request).where(
+                    Request.status == "new",
+                    Request.approval_status == "pending",
+                )
+            )
+            cnt += pending_requests.scalar() or 0
         if cnt:
             pending_note = f"\n⏳ {t('pending_approval', user.language)}: {cnt}"
     name = escape(user.full_name) if user.full_name else role_label

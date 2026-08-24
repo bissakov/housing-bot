@@ -185,3 +185,67 @@ async def test_pending_user_cards_do_not_expose_internal_codes(session):
     assert "worker" not in visible_text
     assert "plumber" not in visible_text
     assert "False" not in visible_text
+
+
+async def test_pending_queue_has_a_clear_empty_state(session):
+    from bot.handlers.dispatcher import build_pending_list
+
+    text, _ = await build_pending_list(session, 0, language="ru")
+
+    assert text == "✅ Нет вопросов, требующих решения."
+
+
+async def test_chairman_pending_queue_includes_request_approvals(session):
+    from bot.handlers.dispatcher import build_pending_list, build_request_detail
+
+    resident = User(
+        telegram_id=61,
+        role="resident",
+        is_approved=True,
+        full_name="Марат Маратов",
+        apartment="44",
+    )
+    worker = User(
+        telegram_id=62,
+        role="worker",
+        worker_category="plumber",
+        is_approved=False,
+        full_name="Новый сантехник",
+    )
+    session.add_all([resident, worker])
+    await session.flush()
+    request = await create_request(
+        session, resident.id, "kazakhdomofon", "Добавление Face ID"
+    )
+
+    dispatcher_text, dispatcher_keyboard = await build_pending_list(
+        session, 0, language="ru"
+    )
+    chairman_text, chairman_keyboard = await build_pending_list(
+        session, 0, language="ru", include_request_approvals=True
+    )
+
+    assert "Регистрация" in dispatcher_text
+    assert "Согласование заявки" not in dispatcher_text
+    assert all(
+        not button.callback_data.startswith("pend_req_view:")
+        for row in dispatcher_keyboard.inline_keyboard
+        for button in row
+    )
+    assert "Регистрация" in chairman_text
+    assert f"Согласование заявки #{request.id}" in chairman_text
+    assert any(
+        button.callback_data.startswith(f"pend_req_view:{request.id}:")
+        for row in chairman_keyboard.inline_keyboard
+        for button in row
+    )
+    _, request_keyboard = await build_request_detail(
+        session, request.id, 0, can_delete=True
+    )
+    request_actions = {
+        button.callback_data
+        for row in request_keyboard.inline_keyboard
+        for button in row
+    }
+    assert f"request_approve:{request.id}" in request_actions
+    assert f"request_reject:{request.id}" in request_actions

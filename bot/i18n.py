@@ -38,7 +38,7 @@ TEXTS = {
     "subrole_tenant": {"kk": "🔑 Жалға алушы", "ru": "🔑 Арендатор"},
     "role_dispatcher": {"kk": "Диспетчер", "ru": "Диспетчер"},
     "role_administrator": {"kk": "Төраға", "ru": "Председатель"},
-    "pending_approval": {"kk": "растауды күтуде", "ru": "ожидают подтверждения"},
+    "pending_approval": {"kk": "шешім күтуде", "ru": "требуют решения"},
     "main_menu": {"kk": "Басты мәзір", "ru": "Главное меню"},
     "cancel": {"kk": "❌ Болдырмау", "ru": "❌ Отмена"},
     "cancelled": {"kk": "❌ Болдырылмады.", "ru": "❌ Отменено."},
@@ -50,7 +50,29 @@ TEXTS = {
     "worker_my_requests": {"kk": "🔧 Менің өтінімдерім", "ru": "🔧 Мои заявки"},
     "summary": {"kk": "📊 Есептер", "ru": "📊 Отчёты"},
     "all_requests": {"kk": "📋 Барлық өтінімдер", "ru": "📋 Все заявки"},
-    "pending_workers": {"kk": "⏳ Растауға", "ru": "⏳ На подтверждение"},
+    "pending_workers": {"kk": "⏳ Шешім күтуде", "ru": "⏳ Требуют решения"},
+    "pending_items_empty": {
+        "kk": "✅ Шешім күтетін ештеңе жоқ.",
+        "ru": "✅ Нет вопросов, требующих решения.",
+    },
+    "pending_items_heading": {
+        "kk": "⏳ <b>Шешім күтуде</b> — {page}/{pages}-бет (барлығы {total})\n"
+              "Шешім қабылдау үшін карточканы ашыңыз\n",
+        "ru": "⏳ <b>Требуют решения</b> — стр. {page}/{pages} (всего {total})\n"
+              "Откройте карточку, чтобы принять решение\n",
+    },
+    "pending_registration_detail": {
+        "kk": "⏳ Жаңа тіркелу: {role}",
+        "ru": "⏳ Новая регистрация: {role}",
+    },
+    "pending_registration_item": {
+        "kk": "👤 <b>Тіркелу #{id}</b> • {role} • {created}\n{name} • {apartment}-пәтер\n",
+        "ru": "👤 <b>Регистрация #{id}</b> • {role} • {created}\n{name} • кв. {apartment}\n",
+    },
+    "pending_request_item": {
+        "kk": "📹 <b>#{id} өтінімді келісу</b> • {created}\n{resident} • {apartment}-пәтер\n<i>{description}</i>\n",
+        "ru": "📹 <b>Согласование заявки #{id}</b> • {created}\n{resident} • кв. {apartment}\n<i>{description}</i>\n",
+    },
     "add_worker": {"kk": "➕ Орындаушы қосу", "ru": "➕ Добавить исполнителя"},
     "announcements_button": {"kk": "📢 Хабарландырулар", "ru": "📢 Объявления"},
     "participants": {"kk": "👥 Қатысушылар", "ru": "👥 Участники"},

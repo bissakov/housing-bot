@@ -356,11 +356,9 @@ async def choose_completion_result(
     await state.set_state(WorkerCompletionStates.waiting_comment)
     await state.set_data({"request_id": request_id, "completion_result": completion_result})
     prompt = (
-        "Кратко опишите, что было сделано. Комментарий обязателен.\n\n"
-        "ИИ бережно улучшит формулировку, не критикуя вашу работу."
+        "Кратко опишите, что было сделано. Комментарий обязателен."
         if completion_result == "done"
-        else "Укажите причину, по которой заявку не удалось выполнить. Комментарий обязателен.\n\n"
-             "ИИ бережно улучшит формулировку, не критикуя вашу работу."
+        else "Укажите причину, по которой заявку не удалось выполнить. Комментарий обязателен."
     )
     await callback.message.answer(prompt, reply_markup=reply_cancel_keyboard(actor.language))
     await callback.answer()

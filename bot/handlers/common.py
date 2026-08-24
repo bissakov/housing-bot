@@ -12,7 +12,8 @@ from bot.auth import is_administrator, is_dispatcher
 from bot.config import ADMIN_IDS
 from bot.constants import CATEGORY_LABELS, REQUEST_CATEGORIES
 from bot.states import RegistrationStates
-from bot.services.notify import notify_dispatchers
+from bot.services.identity import get_actor
+from bot.services.notify import notify_dispatchers, send_to_user
 from bot.i18n import SUPPORTED_LANGUAGES, t, text_variants
 from bot.keyboards import (
     resident_menu, worker_menu, dispatcher_menu, confirm_delete_keyboard,
@@ -45,8 +46,7 @@ def _is_dispatcher(user: User) -> bool:
 @router.callback_query(F.data == "cancel_fsm")
 async def cancel_fsm_cb(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     await state.clear()
-    result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    u = result.scalar_one_or_none()
+    u = await get_actor(session, callback.from_user.id)
     kb = get_main_keyboard(u) if u and u.is_approved else None
     await callback.message.edit_text(t("cancel", u.language if u else None))
     if kb:
@@ -59,27 +59,25 @@ async def cancel_fsm_text(message: Message, state: FSMContext, session: AsyncSes
     if cur is None:
         return
     await state.clear()
-    result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
-    u = result.scalar_one_or_none()
+    u = await get_actor(session, message.from_user.id)
     kb = get_main_keyboard(u) if u and u.is_approved else None
     await message.answer(t("cancelled", u.language if u else None), reply_markup=kb)
 
 async def ensure_user(message: Message, session: AsyncSession) -> User:  # type: ignore[no-redef]
     tid = message.from_user.id
-    result = await session.execute(select(User).where(User.telegram_id == tid))
-    user = result.scalar_one_or_none()
+    user = await session.scalar(select(User).where(User.telegram_id == tid))
     if user:
         if tid in ADMIN_IDS and user.role != "administrator":
             user.role = "administrator"
             user.is_approved = True
             await session.flush()
-        return user
+        return await get_actor(session, tid) or user
     is_admin = tid in ADMIN_IDS
     role = "administrator" if is_admin else "resident"
     user = User(telegram_id=tid, role=role, is_approved=is_admin)
     session.add(user)
     await session.flush()
-    return user
+    return await get_actor(session, tid) or user
 
 
 @router.message(CommandStart())
@@ -97,8 +95,6 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
 
 
 async def _show_start(message: Message, state: FSMContext, session: AsyncSession, user: User):
-
-    # DEV helper hint: /dev switches instantly; /reset does fresh picker. No auto-re-picker on /start for approved users by design.
 
     # Fresh user: offer resident vs worker self-registration before any text prompts
     if not user.is_approved and not user.full_name and not user.apartment and user.worker_category is None:
@@ -186,12 +182,10 @@ async def set_language(callback: CallbackQuery, state: FSMContext, session: Asyn
     if language not in SUPPORTED_LANGUAGES:
         await callback.answer()
         return
-    result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, callback.from_user.id)
     if not user:
         user = User(
             telegram_id=callback.from_user.id,
-            username=callback.from_user.username,
             full_name=callback.from_user.full_name,
         )
         session.add(user)
@@ -213,8 +207,7 @@ async def reg_role_choice(callback: CallbackQuery, state: FSMContext, session: A
         await callback.answer()
         return
     choice = callback.data.split(":", 1)[1]
-    result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    u = result.scalar_one_or_none()
+    u = await get_actor(session, callback.from_user.id)
     language = u.language if u else None
     if choice == "worker":
         if u:
@@ -254,10 +247,7 @@ async def reg_resident_subrole(
     if subrole not in {"owner", "tenant"}:
         await callback.answer(t("registration_error"), show_alert=True)
         return
-    result = await session.execute(
-        select(User).where(User.telegram_id == callback.from_user.id)
-    )
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, callback.from_user.id)
     if not user:
         await callback.answer(t("start_first"), show_alert=True)
         await state.clear()
@@ -286,8 +276,7 @@ async def reg_worker_category_choice(callback: CallbackQuery, state: FSMContext,
         await callback.answer("Неизвестная категория", show_alert=True)
         return
     tid = callback.from_user.id
-    result = await session.execute(select(User).where(User.telegram_id == tid))
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, tid)
     language = user.language if user else None
     if not user:
         await callback.answer(t("start_first", language), show_alert=True)
@@ -334,8 +323,7 @@ async def reg_worker_category_choice(callback: CallbackQuery, state: FSMContext,
 @router.message(RegistrationStates.waiting_name, F.text)
 async def reg_name(message: Message, state: FSMContext, session: AsyncSession):
     name = message.text.strip()
-    result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, message.from_user.id)
     language = user.language if user else None
     if len(name) < 3:
         await message.answer(t("invalid_name", language))
@@ -363,8 +351,7 @@ async def reg_apartment(message: Message, state: FSMContext, session: AsyncSessi
     full_name = data.get("full_name")
 
     tid = message.from_user.id
-    result = await session.execute(select(User).where(User.telegram_id == tid))
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, tid)
     if not user:
         await message.answer(t("registration_error", None))
         await state.clear()
@@ -395,7 +382,10 @@ async def reg_apartment(message: Message, state: FSMContext, session: AsyncSessi
         )]])
         for owner in owners_result.scalars():
             try:
-                await bot.send_message(owner.telegram_id, notification, parse_mode="HTML", reply_markup=markup)
+                await send_to_user(
+                    bot, session, owner, notification,
+                    parse_mode="HTML", reply_markup=markup,
+                )
             except Exception:
                 logger.exception("tenant_registration_owner_notification_failed owner_id=%s", owner.id)
         return
@@ -478,8 +468,7 @@ async def build_announcement_detail(session: AsyncSession, ann_id: int, page: in
 
 @router.message(F.text.in_(text_variants("announcements_button")))
 async def show_announcements(message: Message, session: AsyncSession):
-    result_u = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
-    viewer = result_u.scalar_one_or_none()
+    viewer = await get_actor(session, message.from_user.id)
     if not viewer:
         await message.answer(t("start_first", None))
         return
@@ -490,8 +479,7 @@ async def show_announcements(message: Message, session: AsyncSession):
 @router.callback_query(F.data.startswith("ann_list:"))
 async def ann_list(callback: CallbackQuery, session: AsyncSession):
     page = int(callback.data.split(":")[1])
-    result_u = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    viewer = result_u.scalar_one_or_none()
+    viewer = await get_actor(session, callback.from_user.id)
     if not viewer:
         await callback.answer("Ошибка", show_alert=True)
         return
@@ -504,8 +492,7 @@ async def ann_view(callback: CallbackQuery, session: AsyncSession):
     parts = callback.data.split(":")
     ann_id = int(parts[1])
     page = int(parts[2]) if len(parts) > 2 else 0
-    result_u = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    viewer = result_u.scalar_one_or_none()
+    viewer = await get_actor(session, callback.from_user.id)
     if not viewer:
         await callback.answer("Ошибка", show_alert=True)
         return
@@ -530,8 +517,7 @@ async def confirm_delete_req(callback: CallbackQuery, session: AsyncSession):
         await callback.answer("Заявка не найдена", show_alert=True)
         return
     # RBAC: resident own-new only, worker/dispatcher none, administrator any.
-    res_u = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    actor = res_u.scalar_one_or_none()
+    actor = await get_actor(session, callback.from_user.id)
     if not actor:
         await callback.answer("Ошибка", show_alert=True)
         return
@@ -547,8 +533,7 @@ async def confirm_delete_req(callback: CallbackQuery, session: AsyncSession):
 @router.callback_query(F.data.startswith("delete_ann:"))
 async def confirm_delete_ann(callback: CallbackQuery, session: AsyncSession):  # RBAC ann
     ann_id = int(callback.data.split(":")[1])
-    res_u2 = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    actor2 = res_u2.scalar_one_or_none()
+    actor2 = await get_actor(session, callback.from_user.id)
     if not is_administrator(actor2):
         await callback.answer("⛔ Только администратор может удалить объявление", show_alert=True)
         return
@@ -559,8 +544,7 @@ async def confirm_delete_ann(callback: CallbackQuery, session: AsyncSession):  #
 @router.callback_query(F.data.startswith("confirm_delete_req:"))
 async def do_delete_req(callback: CallbackQuery, session: AsyncSession):
     request_id = int(callback.data.split(":")[1])
-    result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    actor = result.scalar_one_or_none()
+    actor = await get_actor(session, callback.from_user.id)
     if not actor:
         await callback.answer("Ошибка пользователя", show_alert=True)
         return
@@ -577,8 +561,7 @@ async def do_delete_req(callback: CallbackQuery, session: AsyncSession):
 @router.callback_query(F.data.startswith("confirm_delete_ann:"))
 async def do_delete_ann(callback: CallbackQuery, session: AsyncSession):
     ann_id = int(callback.data.split(":")[1])
-    result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    actor = result.scalar_one_or_none()
+    actor = await get_actor(session, callback.from_user.id)
     if not actor:
         await callback.answer("Ошибка пользователя", show_alert=True)
         return

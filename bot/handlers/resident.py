@@ -14,7 +14,13 @@ from bot.services.llm import get_llm
 from bot.config import LLM_DUPLICATE_CONFIDENCE_THRESHOLD
 import json
 import logging
-from bot.services.notify import notify_administrators, notify_workers, notify_dispatchers
+from bot.services.identity import get_actor
+from bot.services.notify import (
+    notify_administrators,
+    notify_dispatchers,
+    notify_workers,
+    send_to_user,
+)
 from html import escape
 from bot.auth import is_approved_owner, is_approved_resident
 from bot.callbacks import ResidentRequestCallback
@@ -88,8 +94,7 @@ async def _tenant_management_view(
 
 
 async def _load_owner(session: AsyncSession, telegram_id: int) -> User | None:
-    result = await session.execute(select(User).where(User.telegram_id == telegram_id))
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, telegram_id)
     return user if is_approved_owner(user) else None
 
 
@@ -152,8 +157,10 @@ async def approve_tenant(callback: CallbackQuery, session: AsyncSession, bot: Bo
         )
         return
     try:
-        await bot.send_message(
-            tenant.telegram_id,
+        await send_to_user(
+            bot,
+            session,
+            tenant,
             "✅ Собственник подтвердил ваш доступ. Теперь вы можете пользоваться ботом.",
             reply_markup=resident_menu(tenant.language),
         )
@@ -185,8 +192,10 @@ async def revoke_tenant(callback: CallbackQuery, session: AsyncSession, bot: Bot
     tenant.approved_by_owner_id = None
     await session.commit()
     try:
-        await bot.send_message(
-            tenant.telegram_id,
+        await send_to_user(
+            bot,
+            session,
+            tenant,
             "❌ Собственник отозвал ваш доступ к боту.",
         )
     except Exception:
@@ -199,9 +208,7 @@ async def revoke_tenant(callback: CallbackQuery, session: AsyncSession, bot: Bot
 async def resident_cancel_cb(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     await state.clear()
     from bot.handlers.common import get_main_keyboard
-    from sqlalchemy import select as _sel
-    res = await session.execute(_sel(User).where(User.telegram_id == callback.from_user.id))
-    u = res.scalar_one_or_none()
+    u = await get_actor(session, callback.from_user.id)
     kb = get_main_keyboard(u) if u and u.is_approved else None
     try:
         await callback.message.edit_text(t("cancel", u.language if u else None))
@@ -217,9 +224,7 @@ async def resident_cancel_text(message: Message, state: FSMContext, session: Asy
         return
     await state.clear()
     from bot.handlers.common import get_main_keyboard
-    from sqlalchemy import select as _sel
-    res = await session.execute(_sel(User).where(User.telegram_id == message.from_user.id))
-    u = res.scalar_one_or_none()
+    u = await get_actor(session, message.from_user.id)
     kb = get_main_keyboard(u) if u and u.is_approved else None
     await message.answer(t("cancelled", u.language if u else None), reply_markup=kb)
 
@@ -340,8 +345,7 @@ async def build_resident_detail(session: AsyncSession, request_id: int, page: in
 
 @router.message(F.text.in_(text_variants("create_request")))
 async def start_request(message: Message, state: FSMContext, session: AsyncSession):
-    result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, message.from_user.id)
     if not is_approved_resident(user):
         await message.answer(t("finish_registration", user.language if user else None))
         return
@@ -384,8 +388,7 @@ def _norm(text: str) -> str:
 
 
 async def _load_resident(session: AsyncSession, telegram_id: int) -> User | None:
-    result = await session.execute(select(User).where(User.telegram_id == telegram_id))
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, telegram_id)
     return user if is_approved_resident(user) else None
 
 
@@ -1212,8 +1215,7 @@ async def confirm_ai_suggestion(callback: CallbackQuery, state: FSMContext, sess
 
 @router.message(F.text.in_(text_variants("my_requests")))
 async def my_requests(message: Message, session: AsyncSession):
-    result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, message.from_user.id)
     if not is_approved_resident(user):
         await message.answer("Сначала /start")
         return
@@ -1224,8 +1226,7 @@ async def my_requests(message: Message, session: AsyncSession):
 @router.callback_query(F.data.startswith("res_list:"))
 async def res_list(callback: CallbackQuery, session: AsyncSession):
     page = int(callback.data.split(":")[1])
-    result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, callback.from_user.id)
     if not is_approved_resident(user):
         await callback.answer("Ошибка", show_alert=True)
         return
@@ -1242,8 +1243,7 @@ async def res_view(
 ):
     req_id = callback_data.request_id
     page = callback_data.page
-    result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, callback.from_user.id)
     if not is_approved_resident(user):
         await callback.answer("Ошибка", show_alert=True)
         return

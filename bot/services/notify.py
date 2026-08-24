@@ -13,6 +13,7 @@ from bot.config import ADMIN_IDS
 from bot.constants import SEED_TG_START
 from bot.i18n import category_label, render, t
 from bot.models import User
+from bot.services.identity import delivery_telegram_id
 from bot.services.schedules import is_worker_available
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,16 @@ async def _send(bot: Bot, telegram_id: int, text: str, **kwargs) -> bool:
     except Exception:
         logger.exception("telegram_delivery_failed recipient=%s", telegram_id)
     return False
+
+
+async def send_to_user(
+    bot: Bot, session: AsyncSession, user: User, text: str, **kwargs
+) -> bool:
+    """Send to a real user or to the controller of a DEV persona."""
+    telegram_id = await delivery_telegram_id(session, user)
+    if telegram_id is None:
+        return False
+    return await _send(bot, telegram_id, text, **kwargs)
 
 
 async def notify_workers(
@@ -96,7 +107,10 @@ async def notify_workers(
             values.setdefault("available_requests", t("available_requests", worker.language))
             localized_text = t(message_key, worker.language, **values)
         send_kwargs = {"parse_mode": "HTML"} if message_key else {}
-        if await _send(bot, worker.telegram_id, localized_text, **send_kwargs):
+        telegram_id = await delivery_telegram_id(session, worker, active_only=True)
+        if telegram_id is None:
+            continue
+        if await _send(bot, telegram_id, localized_text, **send_kwargs):
             delivered += 1
         else:
             failed += 1
@@ -122,7 +136,11 @@ async def notify_dispatchers(
         select(User).where(User.role.in_(("dispatcher", "administrator")))
     )
     db_dispatchers = result.scalars().all()
-    recipients = {user.telegram_id: user.language for user in db_dispatchers}
+    recipients = {}
+    for user in db_dispatchers:
+        telegram_id = await delivery_telegram_id(session, user, active_only=True)
+        if telegram_id is not None:
+            recipients[telegram_id] = user.language
     recipients.update({telegram_id: None for telegram_id in ADMIN_IDS if telegram_id not in recipients})
     # Synthetic demo accounts have no chat; skip them instead of burning a failed API call each.
     recipients = {tid: language for tid, language in recipients.items() if tid < SEED_TG_START}
@@ -146,7 +164,15 @@ async def notify_administrators(
             User.role == "administrator", User.is_approved.is_(True)
         )
     )
-    recipients = {user.telegram_id for user in result.scalars().all()}
+    recipients = {
+        telegram_id
+        for user in result.scalars().all()
+        if (
+            telegram_id := await delivery_telegram_id(
+                session, user, active_only=True
+            )
+        ) is not None
+    }
     recipients.update(ADMIN_IDS)
     recipients = {tid for tid in recipients if tid < SEED_TG_START}
     delivered = failed = 0
@@ -160,7 +186,8 @@ async def notify_administrators(
 
 async def notify_resident(
     bot: Bot,
-    resident_telegram_id: int,
+    session: AsyncSession,
+    resident: User,
     text: str,
     *,
     language: str | None = None,
@@ -168,7 +195,7 @@ async def notify_resident(
     message_values: dict | None = None,
 ) -> bool:
     localized_text = render(message_key, language, message_values) if message_key else text
-    return await _send(bot, resident_telegram_id, localized_text)
+    return await send_to_user(bot, session, resident, localized_text)
 
 
 async def broadcast_announcement(
@@ -179,9 +206,15 @@ async def broadcast_announcement(
 
     delivered = failed = 0
     escaped_text = escape(text)
+    recipients: dict[int, User] = {}
     for user in users:
+        telegram_id = await delivery_telegram_id(session, user, active_only=True)
+        if telegram_id is not None:
+            recipients[telegram_id] = user
+
+    for telegram_id, user in recipients.items():
         message = t("announcement_broadcast", user.language, text=escaped_text)
-        if await _send(bot, user.telegram_id, message, parse_mode="HTML"):
+        if await _send(bot, telegram_id, message, parse_mode="HTML"):
             delivered += 1
         else:
             failed += 1

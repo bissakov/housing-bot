@@ -41,18 +41,19 @@ async def main():
     dp.message.middleware(DbSessionMiddleware(async_session))
     dp.callback_query.middleware(DbSessionMiddleware(async_session))
 
-    # Routers - order matters: common first, then role-specific
+    # DEV commands come first so /dev and /reset remain reachable from an
+    # in-progress FSM form.
+    if DEV_MODE:
+        from bot.handlers import dev as dev_handler
+        dp.include_router(dev_handler.router)
+        logger.warning("DEV_MODE=ON — development personas enabled (disable in prod)")
+
+    # Application routers - common commands first, then role-specific handlers.
     dp.include_router(common.router)
     dp.include_router(resident.router)
     dp.include_router(worker.router)
     dp.include_router(chairman.router)
     dp.include_router(dispatcher.router)
-
-    # DEV-only router: /dev switch (guarded at handler level, but only include when DEV_MODE)
-    if DEV_MODE:
-        from bot.handlers import dev as dev_handler
-        dp.include_router(dev_handler.router)
-        logger.warning("DEV_MODE=ON — /dev handler enabled (disable in prod)")
 
     # Register the command menu shown in Telegram clients.
     # Keep in sync with the actual slash handlers in bot/handlers/*.
@@ -61,8 +62,12 @@ async def main():
         BotCommand(command="language", description="Тілді өзгерту / Изменить язык"),
     ]
     if DEV_MODE:
-        commands.append(BotCommand(command="dev", description="Быстро сменить роль (только для разработки и отладки)"))
-        commands.append(BotCommand(command="reset", description="Удалить профиль и заново зарегистрироваться (только для разработки и отладки)"))
+        commands.append(BotCommand(
+            command="dev", description="Тұрақты тест персонасын таңдау"
+        ))
+        commands.append(BotCommand(
+            command="reset", description="Профильді жойып, тіркелуді қайта тексеру"
+        ))
     try:
         await bot.set_my_commands(commands)
         logger.info("Bot commands registered: %s", [c.command for c in commands])

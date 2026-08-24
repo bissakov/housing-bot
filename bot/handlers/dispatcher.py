@@ -17,7 +17,8 @@ from bot.keyboards import (
 )
 from bot.services.requests import assign_request, create_announcement
 from bot.services.llm import get_llm
-from bot.services.notify import broadcast_announcement
+from bot.services.identity import delivery_telegram_id, get_actor
+from bot.services.notify import broadcast_announcement, send_to_user
 from bot.services.schedules import (
     WEEKDAY_LABELS,
     add_local_exception,
@@ -58,8 +59,7 @@ async def dispatcher_cancel_cb(callback: CallbackQuery, state: FSMContext, sessi
         return
     await state.clear()
     from bot.handlers.common import get_main_keyboard
-    res = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    u = res.scalar_one_or_none()
+    u = await get_actor(session, callback.from_user.id)
     kb = get_main_keyboard(u) if u and u.is_approved else None
     try:
         await callback.message.edit_text(t("cancel", u.language if u else None))
@@ -75,8 +75,7 @@ async def dispatcher_cancel_text(message: Message, state: FSMContext, session: A
         return
     await state.clear()
     from bot.handlers.common import get_main_keyboard
-    res = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
-    u = res.scalar_one_or_none()
+    u = await get_actor(session, message.from_user.id)
     kb = get_main_keyboard(u) if u and u.is_approved else None
     await message.answer(t("cancelled", u.language if u else None), reply_markup=kb)
 
@@ -88,10 +87,7 @@ def _is_dispatcher(user: User) -> bool:
 
 
 async def _require_dispatcher(event: Message | CallbackQuery, session: AsyncSession) -> bool:
-    result = await session.execute(
-        select(User).where(User.telegram_id == event.from_user.id)
-    )
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, event.from_user.id)
     allowed = is_dispatcher(user)
     if not allowed:
         if isinstance(event, CallbackQuery):
@@ -102,10 +98,8 @@ async def _require_dispatcher(event: Message | CallbackQuery, session: AsyncSess
 
 
 async def _event_language(event: Message | CallbackQuery, session: AsyncSession) -> str:
-    result = await session.execute(
-        select(User.language).where(User.telegram_id == event.from_user.id)
-    )
-    return normalize_language(result.scalar_one_or_none())
+    user = await get_actor(session, event.from_user.id)
+    return normalize_language(user.language if user else None)
 
 
 async def _total_requests(
@@ -361,8 +355,7 @@ async def _send_request_attachments(
 
 @router.message(F.text.in_(text_variants("summary")))
 async def dispatcher_summary(message: Message, session: AsyncSession):
-    result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, message.from_user.id)
     if not user or not _is_dispatcher(user):
         await message.answer("Только для диспетчеров.")
         return
@@ -405,7 +398,7 @@ async def dispatcher_report_callback(
     session: AsyncSession,
     state: FSMContext,
 ):
-    user = await session.scalar(select(User).where(User.telegram_id == callback.from_user.id))
+    user = await get_actor(session, callback.from_user.id)
     if not is_dispatcher(user):
         await callback.answer("Недостаточно прав", show_alert=True)
         return
@@ -493,8 +486,7 @@ async def report_custom_end(message: Message, session: AsyncSession, state: FSMC
 
 @router.message(F.text.in_(text_variants("all_requests")))
 async def all_requests(message: Message, session: AsyncSession):
-    result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, message.from_user.id)
     if not user or not _is_dispatcher(user):
         await message.answer("Только для диспетчеров.")
         return
@@ -505,8 +497,7 @@ async def all_requests(message: Message, session: AsyncSession):
 @router.callback_query(F.data.startswith("disp_list:"))
 async def disp_list(callback: CallbackQuery, session: AsyncSession):
     # also check auth
-    result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, callback.from_user.id)
     if not user or not _is_dispatcher(user):
         await callback.answer("Нет прав", show_alert=True)
         return
@@ -522,8 +513,7 @@ async def disp_list(callback: CallbackQuery, session: AsyncSession):
 
 @router.callback_query(F.data.startswith("disp_filter:"))
 async def disp_filter(callback: CallbackQuery, session: AsyncSession):
-    result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, callback.from_user.id)
     if not user or not _is_dispatcher(user):
         await callback.answer("Нет прав", show_alert=True)
         return
@@ -560,8 +550,7 @@ async def req_view(
 ):
     req_id = callback_data.request_id
     page = callback_data.page
-    result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, callback.from_user.id)
     if not user or not _is_dispatcher(user):
         await callback.answer("Нет прав", show_alert=True)
         return
@@ -583,8 +572,7 @@ async def filtered_req_view(
     session: AsyncSession,
     bot: Bot,
 ):
-    result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, callback.from_user.id)
     if not user or not _is_dispatcher(user):
         await callback.answer("Нет прав", show_alert=True)
         return
@@ -617,10 +605,7 @@ async def request_history(
     callback_data: DispatcherHistoryCallback,
     session: AsyncSession,
 ):
-    actor_result = await session.execute(
-        select(User).where(User.telegram_id == callback.from_user.id)
-    )
-    viewer = actor_result.scalar_one_or_none()
+    viewer = await get_actor(session, callback.from_user.id)
     if not _is_dispatcher(viewer):
         await callback.answer("Нет прав", show_alert=True)
         return
@@ -702,8 +687,7 @@ async def request_history(
 @router.callback_query(F.data.startswith("disp_page:"))
 async def paginate_compat(callback: CallbackQuery, session: AsyncSession):
     page = int(callback.data.split(":")[1])
-    result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, callback.from_user.id)
     if not user or not _is_dispatcher(user):
         await callback.answer("Нет прав", show_alert=True)
         return
@@ -715,8 +699,7 @@ async def paginate_compat(callback: CallbackQuery, session: AsyncSession):
 @router.callback_query(F.data.startswith("assign:") | F.data.startswith("reassign:"))
 async def start_assign(callback: CallbackQuery, session: AsyncSession):
     request_id = int(callback.data.split(":")[1])
-    result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, callback.from_user.id)
     if not user or not _is_dispatcher(user):
         await callback.answer("Нет прав", show_alert=True)
         return
@@ -751,8 +734,7 @@ async def do_assign(callback: CallbackQuery, session: AsyncSession, bot: Bot):
     request_id = int(req_id)
     worker_db_id = int(worker_db_id)
 
-    result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, callback.from_user.id)
     if not user or not _is_dispatcher(user):
         await callback.answer("Нет прав", show_alert=True)
         return
@@ -773,14 +755,21 @@ async def do_assign(callback: CallbackQuery, session: AsyncSession, bot: Bot):
     req = q.scalar_one_or_none()
     if worker and req:
         try:
-            await bot.send_message(worker.telegram_id, f"📌 Вам назначена заявка #{req.id}\n{escape(req.description[:500])}")
+            await send_to_user(
+                bot, session, worker,
+                f"📌 Вам назначена заявка #{req.id}\n{escape(req.description[:500])}",
+            )
         except Exception:
             pass
         rres = await session.execute(select(User).where(User.id == req.resident_id))
         resident = rres.scalar_one_or_none()
         if resident:
             try:
-                await bot.send_message(resident.telegram_id, f"📌 Ваша заявка #{req.id} назначена исполнителю {escape(worker.full_name or str(worker.telegram_id))}")
+                await send_to_user(
+                    bot, session, resident,
+                    f"📌 Ваша заявка #{req.id} назначена исполнителю "
+                    f"{escape(worker.full_name or str(worker.telegram_id))}",
+                )
             except Exception:
                 pass
 
@@ -961,8 +950,7 @@ async def build_pending_detail(
     }
 ))
 async def pending_approvals(message: Message, session: AsyncSession):
-    result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
-    viewer = result.scalar_one_or_none()
+    viewer = await get_actor(session, message.from_user.id)
     if not viewer or not _is_dispatcher(viewer):
         await message.answer("Только для диспетчеров.")
         return
@@ -977,8 +965,7 @@ async def pending_approvals(message: Message, session: AsyncSession):
 @router.callback_query(F.data.startswith("pend_list:"))
 async def pend_list(callback: CallbackQuery, session: AsyncSession):
     page = int(callback.data.split(":")[1])
-    result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    viewer = result.scalar_one_or_none()
+    viewer = await get_actor(session, callback.from_user.id)
     if not viewer or not _is_dispatcher(viewer):
         await callback.answer("Нет прав", show_alert=True)
         return
@@ -996,8 +983,7 @@ async def pend_view(callback: CallbackQuery, session: AsyncSession):
     parts = callback.data.split(":")
     uid = int(parts[1])
     page = int(parts[2]) if len(parts) > 2 else 0
-    result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    viewer = result.scalar_one_or_none()
+    viewer = await get_actor(session, callback.from_user.id)
     if not viewer or not _is_dispatcher(viewer):
         await callback.answer("Нет прав", show_alert=True)
         return
@@ -1015,10 +1001,7 @@ async def pending_request_view(
     parts = callback.data.split(":")
     request_id = int(parts[1])
     page = int(parts[2]) if len(parts) > 2 else 0
-    result = await session.execute(
-        select(User).where(User.telegram_id == callback.from_user.id)
-    )
-    viewer = result.scalar_one_or_none()
+    viewer = await get_actor(session, callback.from_user.id)
     if not is_administrator(viewer):
         await callback.answer("Только для председателя", show_alert=True)
         return
@@ -1042,8 +1025,7 @@ async def pending_request_view(
 
 @router.callback_query(F.data.startswith("approve:"))
 async def approve_user(callback: CallbackQuery, session: AsyncSession, bot: Bot):
-    actor_result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    if not _is_dispatcher(actor_result.scalar_one_or_none()):
+    if not _is_dispatcher(await get_actor(session, callback.from_user.id)):
         await callback.answer("Нет прав", show_alert=True)
         return
     user_db_id = int(callback.data.split(":")[1])
@@ -1065,15 +1047,17 @@ async def approve_user(callback: CallbackQuery, session: AsyncSession, bot: Bot)
     await callback.message.edit_text(callback.message.text + "\n\n✅ Одобрен")
     await callback.answer("Одобрен")
     try:
-        await bot.send_message(u.telegram_id, "✅ Ваша регистрация подтверждена диспетчером! Теперь можете создать заявку: /start")
+        await send_to_user(
+            bot, session, u,
+            "✅ Ваша регистрация подтверждена диспетчером! Теперь можете создать заявку: /start",
+        )
     except Exception:
         pass
 
 
 @router.callback_query(F.data.startswith("reject:"))
 async def reject_user(callback: CallbackQuery, session: AsyncSession, bot: Bot):
-    actor_result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    if not _is_dispatcher(actor_result.scalar_one_or_none()):
+    if not _is_dispatcher(await get_actor(session, callback.from_user.id)):
         await callback.answer("Нет прав", show_alert=True)
         return
     user_db_id = int(callback.data.split(":")[1])
@@ -1085,13 +1069,14 @@ async def reject_user(callback: CallbackQuery, session: AsyncSession, bot: Bot):
     if u.role == "resident" and u.resident_subrole == "tenant":
         await callback.answer("Арендатора подтверждает собственник", show_alert=True)
         return
-    tid = u.telegram_id
+    tid = await delivery_telegram_id(session, u)
     await session.delete(u)
     await session.commit()
     await callback.message.edit_text(callback.message.text + "\n\n❌ Отклонен")
     await callback.answer("Отклонен")
     try:
-        await bot.send_message(tid, "❌ Ваша регистрация отклонена диспетчером. Обратитесь в диспетчерскую.")
+        if tid is not None:
+            await bot.send_message(tid, "❌ Ваша регистрация отклонена диспетчером. Обратитесь в диспетчерскую.")
     except Exception:
         pass
 
@@ -1100,8 +1085,7 @@ async def reject_user(callback: CallbackQuery, session: AsyncSession, bot: Bot):
 
 @router.message(F.text.in_(text_variants("announcement")))
 async def create_ann_start(message: Message, state: FSMContext, session: AsyncSession):
-    result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, message.from_user.id)
     if not user or not _is_dispatcher(user):
         await message.answer("Только для диспетчеров.")
         return
@@ -1139,8 +1123,7 @@ async def create_ann_finish(message: Message, state: FSMContext, session: AsyncS
     except Exception:
         logger.exception("announcement_polish_failed")
 
-    result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, message.from_user.id)
     ann = await create_announcement(session, author_id=user.id, text=text)
     await session.commit()
     await state.clear()
@@ -1160,8 +1143,7 @@ async def ann_use_pick(callback: CallbackQuery, state: FSMContext, session: Asyn
         await callback.answer("Истёк таймаут, введите заново", show_alert=True)
         await state.clear()
         return
-    result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, callback.from_user.id)
     ann = await create_announcement(session, author_id=user.id, text=text)
     await session.commit()
     await state.clear()
@@ -1181,8 +1163,7 @@ async def ann_use_pick(callback: CallbackQuery, state: FSMContext, session: Asyn
 
 @router.callback_query(F.data.startswith("ai_triage:"))
 async def ai_triage(callback: CallbackQuery, session: AsyncSession):
-    actor_result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    if not _is_dispatcher(actor_result.scalar_one_or_none()):
+    if not _is_dispatcher(await get_actor(session, callback.from_user.id)):
         await callback.answer("Нет прав", show_alert=True)
         return
     req_id = int(callback.data.split(":", 1)[1])
@@ -1381,8 +1362,7 @@ async def schedule_clear(callback: CallbackQuery, session: AsyncSession):
 
 @router.message(F.text.in_(text_variants("add_worker")))
 async def add_worker_start(message: Message, state: FSMContext, session: AsyncSession):
-    result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, message.from_user.id)
     if not user or not _is_dispatcher(user):
         await message.answer("Только для диспетчеров.")
         return
@@ -1405,8 +1385,7 @@ async def add_worker_tid(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("add_worker_cat:"))
 async def add_worker_finish(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
-    actor_result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    if not _is_dispatcher(actor_result.scalar_one_or_none()):
+    if not _is_dispatcher(await get_actor(session, callback.from_user.id)):
         await callback.answer("Нет прав", show_alert=True)
         return
     category = callback.data.split(":")[1]

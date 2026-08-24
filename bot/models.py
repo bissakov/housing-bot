@@ -56,6 +56,43 @@ class User(Base):
     )
 
 
+class DevPersona(Base):
+    """Stable synthetic user controlled by one developer in DEV_MODE."""
+
+    __tablename__ = "dev_personas"
+    __table_args__ = (
+        UniqueConstraint(
+            "controller_telegram_id", "persona_key",
+            name="uq_dev_personas_controller_key",
+        ),
+        UniqueConstraint("user_id", name="uq_dev_personas_user"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    controller_telegram_id: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, index=True
+    )
+    persona_key: Mapped[str] = mapped_column(String(40), nullable=False)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+
+    user: Mapped["User"] = relationship("User")
+
+
+class DevSession(Base):
+    """The persona currently impersonated by a Telegram account."""
+
+    __tablename__ = "dev_sessions"
+
+    controller_telegram_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    persona_id: Mapped[int] = mapped_column(
+        ForeignKey("dev_personas.id", ondelete="CASCADE"), nullable=False
+    )
+
+    persona: Mapped["DevPersona"] = relationship("DevPersona")
+
+
 class WorkerWorkingHour(Base):
     """One recurring local-time interval in a worker's official schedule."""
 

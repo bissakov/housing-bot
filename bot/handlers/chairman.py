@@ -17,7 +17,8 @@ from bot.handlers.common import get_main_keyboard
 from bot.i18n import role_label, text_variants
 from bot.keyboards import reply_cancel_keyboard
 from bot.models import Request, User
-from bot.services.notify import notify_resident, notify_workers
+from bot.services.identity import get_actor
+from bot.services.notify import notify_resident, notify_workers, send_to_user
 from bot.services.requests import approve_request, reject_request
 from bot.states import RequestApprovalStates
 
@@ -27,10 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 async def _chairman(session: AsyncSession, telegram_id: int) -> User | None:
-    result = await session.execute(
-        select(User).where(User.telegram_id == telegram_id)
-    )
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, telegram_id)
     return user if is_administrator(user) else None
 
 
@@ -113,8 +111,8 @@ async def revoke_participant(
     target.approved_by_owner_id = None
     await session.commit()
     try:
-        await bot.send_message(
-            target.telegram_id, "Председатель отозвал ваш доступ к боту."
+        await send_to_user(
+            bot, session, target, "Председатель отозвал ваш доступ к боту."
         )
     except Exception:
         logger.info("revoked_participant_unreachable user_id=%s", target.id)
@@ -151,7 +149,8 @@ async def approve_kazakhdomofon_request(
     if resident:
         await notify_resident(
             bot,
-            resident.telegram_id,
+            session,
+            resident,
             f"✅ Ваша заявка #{request.id} согласована председателем и "
             "направлена Казахдомофон.",
         )
@@ -220,7 +219,8 @@ async def finish_reject_kazakhdomofon_request(
     if resident:
         await notify_resident(
             bot,
-            resident.telegram_id,
+            session,
+            resident,
             f"❌ Ваша заявка #{request_id} отклонена председателем.\n"
             f"Комментарий: {comment}",
         )

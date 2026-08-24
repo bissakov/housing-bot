@@ -66,6 +66,24 @@ The command is safe to rerun without `--reset`: it tops the demo dataset up to
 the requested number instead of duplicating it. Demo users use Telegram IDs
 starting at `8800000000`, so they are easy to distinguish from real users.
 
+## Development personas
+
+Set `DEV_MODE=true`, restart the bot, and send `/dev` to select a stable test
+persona. The available personas cover resident owner and tenant, every worker
+category, dispatcher, and chairman. They use Kazakh-facing names and `kk` as
+their default language.
+
+A persona is created only on first use and then reused. Switching personas does
+not rewrite the developer's profile or the role attached to historical
+requests. Notifications addressed to the selected persona are delivered to the
+developer controlling it. **Өз профилім** returns to the ordinary profile, and
+the cleanup button clears the selected persona's requests and schedule without
+deleting the persona itself.
+
+`/reset` remains separate: it exits persona mode and resets the developer's
+ordinary profile so the registration flow can be tested from the beginning.
+Run `alembic upgrade head` after enabling this feature on an existing database.
+
 ## Docker
 
 The Compose setup runs the bot as an unprivileged user and persists its SQLite

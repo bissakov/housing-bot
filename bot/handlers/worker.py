@@ -18,6 +18,7 @@ from bot.keyboards import (
 )
 from bot.services.requests import claim_request, close_request, get_requests_for_worker
 from bot.services.notify import notify_resident, notify_dispatchers
+from bot.services.identity import get_actor
 from bot.auth import is_approved_worker, can_view_available_request, can_view_assigned_request
 from bot.callbacks import WorkerAvailableCallback, WorkerAssignedCallback
 from bot.constants import URGENCY_LABELS
@@ -137,8 +138,7 @@ async def build_worker_mine(session: AsyncSession, user: User, page: int) -> tup
 
 @router.message(F.text.in_(text_variants("shift_on") | text_variants("shift_off")))
 async def toggle_shift(message: Message, session: AsyncSession):
-    result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, message.from_user.id)
     if not is_approved_worker(user):
         await message.answer("Только для исполнителей.")
         return
@@ -150,8 +150,7 @@ async def toggle_shift(message: Message, session: AsyncSession):
 
 @router.message(F.text.in_(text_variants("available_requests")))
 async def available_requests(message: Message, session: AsyncSession):
-    result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, message.from_user.id)
     if not is_approved_worker(user):
         await message.answer("Доступно только исполнителям.")
         return
@@ -167,8 +166,7 @@ async def available_requests(message: Message, session: AsyncSession):
 
 @router.message(F.text.in_(text_variants("worker_my_requests")))
 async def my_worker_requests(message: Message, session: AsyncSession):
-    result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, message.from_user.id)
     if not is_approved_worker(user):
         await message.answer("Только для исполнителей.")
         return
@@ -179,8 +177,7 @@ async def my_worker_requests(message: Message, session: AsyncSession):
 @router.callback_query(F.data.startswith("w_av_list:"))
 async def w_av_list(callback: CallbackQuery, session: AsyncSession):
     page = int(callback.data.split(":")[1])
-    result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, callback.from_user.id)
     if not is_approved_worker(user) or not user.is_on_shift:
         await callback.answer("Нет прав", show_alert=True)
         return
@@ -192,8 +189,7 @@ async def w_av_list(callback: CallbackQuery, session: AsyncSession):
 @router.callback_query(F.data.startswith("w_my_list:"))
 async def w_my_list(callback: CallbackQuery, session: AsyncSession):
     page = int(callback.data.split(":")[1])
-    result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    user = result.scalar_one_or_none()
+    user = await get_actor(session, callback.from_user.id)
     if not is_approved_worker(user):
         await callback.answer("Нет прав", show_alert=True)
         return
@@ -220,8 +216,9 @@ async def w_av_view(
     if not req:
         await callback.answer("Не найдена", show_alert=True)
         return
-    user_result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    if not can_view_available_request(user_result.scalar_one_or_none(), req):
+    if not can_view_available_request(
+        await get_actor(session, callback.from_user.id), req
+    ):
         await callback.answer("Заявка недоступна", show_alert=True)
         return
     rres = await session.execute(select(User).where(User.id == req.resident_id))
@@ -270,8 +267,9 @@ async def w_my_view(
     if not req:
         await callback.answer("Не найдена", show_alert=True)
         return
-    user_result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    if not can_view_assigned_request(user_result.scalar_one_or_none(), req):
+    if not can_view_assigned_request(
+        await get_actor(session, callback.from_user.id), req
+    ):
         await callback.answer("Заявка недоступна", show_alert=True)
         return
     rres = await session.execute(select(User).where(User.id == req.resident_id))
@@ -304,8 +302,7 @@ async def noop(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("claim:"))
 async def handle_claim(callback: CallbackQuery, session: AsyncSession, bot: Bot):
     request_id = int(callback.data.split(":")[1])
-    result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    worker = result.scalar_one_or_none()
+    worker = await get_actor(session, callback.from_user.id)
     if not is_approved_worker(worker):
         await callback.answer("Только для исполнителей", show_alert=True)
         return
@@ -325,7 +322,8 @@ async def handle_claim(callback: CallbackQuery, session: AsyncSession, bot: Bot)
         if resident:
             await notify_resident(
                 bot,
-                resident.telegram_id,
+                session,
+                resident,
                 "",
                 language=resident.language,
                 message_key="request_accepted_notification",
@@ -343,8 +341,7 @@ async def choose_completion_result(
 ):
     _, request_id_raw, completion_result = callback.data.split(":", 2)
     request_id = int(request_id_raw)
-    result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
-    actor = result.scalar_one_or_none()
+    actor = await get_actor(session, callback.from_user.id)
     if not is_approved_worker(actor):
         await callback.answer("Только для исполнителей", show_alert=True)
         return
@@ -375,8 +372,7 @@ async def handle_completion_comment(
     data = await state.get_data()
     request_id = data.get("request_id")
     completion_result = data.get("completion_result")
-    actor_result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
-    actor = actor_result.scalar_one_or_none()
+    actor = await get_actor(session, message.from_user.id)
     q = await session.execute(select(Request).where(Request.id == request_id))
     req = q.scalar_one_or_none()
     if (
@@ -452,7 +448,8 @@ async def handle_completion_comment(
             icon = "✅" if completion_result == "done" else "❌"
             await notify_resident(
                 bot,
-                resident.telegram_id,
+                session,
+                resident,
                 f"{icon} Ваша заявка #{req.id} {result_label}.\n"
                 f"Комментарий исполнителя: {final_comment}",
             )

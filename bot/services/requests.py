@@ -56,6 +56,14 @@ async def create_request(
     )
     session.add(req)
     await session.flush()
+    # A legacy SQLite database may contain media orphaned before foreign-key
+    # enforcement was enabled. SQLite can reuse the deleted request's integer
+    # ID, so clear any such rows before attaching files to the new request.
+    await session.execute(
+        delete(RequestAttachment).where(
+            RequestAttachment.request_id == req.id
+        )
+    )
     for attachment in attachments or []:
         session.add(RequestAttachment(request_id=req.id, **attachment))
     session.add(_event(req.id, "created", resident_id, f"category={category}"))
@@ -295,6 +303,15 @@ async def delete_request(session: AsyncSession, request_id: int, actor: User) ->
         return False, "Недостаточно прав для удаления"
 
     session.add(_event(request_id, "deleted", actor.id, details))
+    # Bulk deletes bypass the ORM relationship cascade.  SQLite also leaves
+    # database-level cascades disabled unless explicitly enabled, so deleting a
+    # request could leave its attachments behind.  If SQLite then reused the
+    # request ID, those stale files appeared on an unrelated new request.
+    await session.execute(
+        delete(RequestAttachment).where(
+            RequestAttachment.request_id == request_id
+        )
+    )
     await session.execute(delete(Request).where(Request.id == request_id))
     await session.flush()
     return True, "ok"

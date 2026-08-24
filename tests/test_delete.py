@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import AsyncMock, patch
 from sqlalchemy import select
-from bot.models import Request, Announcement
+from bot.models import Request, RequestAttachment, Announcement
 from bot.keyboards import dispatcher_request_keyboard
 from bot.services.requests import delete_request, delete_announcement
 from tests.conftest import create_user, make_callback, make_message
@@ -16,6 +16,52 @@ async def test_resident_can_delete_own_new(session):
     assert ok
     result = await session.execute(select(Request).where(Request.id == req.id))
     assert result.scalar_one_or_none() is None
+
+
+@pytest.mark.asyncio
+async def test_deleted_request_attachments_do_not_leak_when_id_is_reused(session):
+    resident = await create_user(session, telegram_id=112, role="resident")
+    from bot.services.requests import create_request
+
+    cleaning = await create_request(
+        session,
+        resident_id=resident.id,
+        category="cleaning",
+        description="Грязный пол у лифта",
+        attachments=[{
+            "file_id": "cleaning-photo",
+            "file_unique_id": "cleaning-photo-unique",
+            "media_type": "photo",
+        }],
+    )
+    deleted_id = cleaning.id
+    ok, _ = await delete_request(session, deleted_id, resident)
+    assert ok
+
+    face_id = await create_request(
+        session,
+        resident_id=resident.id,
+        category="kazakhdomofon",
+        description="Добавление Face ID",
+        attachments=[{
+            "file_id": "face-id-photo",
+            "file_unique_id": "face-id-photo-unique",
+            "media_type": "photo",
+        }],
+    )
+
+    # SQLite reuses the highest deleted integer primary key. This is the exact
+    # production sequence that made an old cleaning photo look related.
+    assert face_id.id == deleted_id
+    attachments = (
+        await session.execute(
+            select(RequestAttachment)
+            .where(RequestAttachment.request_id == face_id.id)
+        )
+    ).scalars().all()
+    assert [attachment.file_id for attachment in attachments] == [
+        "face-id-photo"
+    ]
 
 @pytest.mark.asyncio
 async def test_resident_cannot_delete_accepted(session):

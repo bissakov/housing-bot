@@ -18,6 +18,7 @@ from bot.models import (
     DevPersona,
     DevSession,
     Request,
+    RequestAttachment,
     RequestEvent,
     User,
     WorkerScheduleException,
@@ -271,6 +272,17 @@ async def dev_switch(callback: CallbackQuery, session: AsyncSession):
 
 
 async def _clear_persona_data(session: AsyncSession, persona_user_id: int) -> None:
+    persona_request_ids = select(Request.id).where(
+        Request.resident_id == persona_user_id
+    )
+    # Request removal below is a bulk delete, which does not run the ORM's
+    # delete-orphan cascade.  Remove media explicitly for SQLite installations
+    # where foreign-key cascades may not have been enabled historically.
+    await session.execute(
+        delete(RequestAttachment).where(
+            RequestAttachment.request_id.in_(persona_request_ids)
+        )
+    )
     await session.execute(
         update(Request)
         .where(

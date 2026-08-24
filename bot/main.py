@@ -1,7 +1,6 @@
 import asyncio
 import logging
 from aiogram import Bot, Dispatcher
-from aiogram.types import BotCommand
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -11,6 +10,7 @@ from bot.database import async_session, init_db, close_db
 from bot.middlewares import DbSessionMiddleware
 from bot.handlers import chairman, common, resident, worker, dispatcher
 from bot.services.scheduler import setup_scheduler
+from bot.commands import register_global_command_menus
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -57,20 +57,9 @@ async def main():
 
     # Register the command menu shown in Telegram clients.
     # Keep in sync with the actual slash handlers in bot/handlers/*.
-    commands = [
-        BotCommand(command="start", description="Тіркелу / Регистрация"),
-        BotCommand(command="language", description="Тілді өзгерту / Изменить язык"),
-    ]
-    if DEV_MODE:
-        commands.append(BotCommand(
-            command="dev", description="Тұрақты тест персонасын таңдау"
-        ))
-        commands.append(BotCommand(
-            command="reset", description="Профильді жойып, тіркелуді қайта тексеру"
-        ))
     try:
-        await bot.set_my_commands(commands)
-        logger.info("Bot commands registered: %s", [c.command for c in commands])
+        await register_global_command_menus(bot, include_dev=DEV_MODE)
+        logger.info("Localized bot commands registered")
     except Exception as exc:  # noqa: BLE001 - don't block startup on menu sync
         logger.warning("Failed to set bot commands: %s", exc)
 

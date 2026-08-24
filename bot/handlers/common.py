@@ -9,7 +9,8 @@ import logging
 
 from bot.models import Request, User
 from bot.auth import is_administrator, is_dispatcher
-from bot.config import ADMIN_IDS
+from bot.config import ADMIN_IDS, DEV_MODE
+from bot.commands import set_chat_command_menu
 from bot.constants import CATEGORY_LABELS, REQUEST_CATEGORIES
 from bot.states import RegistrationStates
 from bot.services.identity import get_actor, sync_persona_languages
@@ -81,7 +82,12 @@ async def ensure_user(message: Message, session: AsyncSession) -> User:  # type:
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
+async def cmd_start(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    bot: Bot | None = None,
+):
     await state.clear()
     user = await ensure_user(message, session)
     await session.commit()
@@ -90,6 +96,17 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
         await state.set_state(RegistrationStates.waiting_language)
         await message.answer(t("choose_language", "kk"), reply_markup=language_keyboard())
         return
+
+    if bot is not None:
+        try:
+            await set_chat_command_menu(
+                bot,
+                message.chat.id,
+                user.language,
+                include_dev=DEV_MODE,
+            )
+        except Exception as exc:  # noqa: BLE001 - menu sync must not block /start
+            logger.warning("Failed to sync command menu for chat %s: %s", message.chat.id, exc)
 
     await _show_start(message, state, session, user)
 
@@ -177,7 +194,12 @@ async def cmd_language(message: Message, state: FSMContext, session: AsyncSessio
 
 
 @router.callback_query(F.data.startswith("set_language:"))
-async def set_language(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+async def set_language(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    bot: Bot | None = None,
+):
     language = callback.data.split(":", 1)[1]
     if language not in SUPPORTED_LANGUAGES:
         await callback.answer()
@@ -204,6 +226,20 @@ async def set_language(callback: CallbackQuery, state: FSMContext, session: Asyn
             session, callback.from_user.id, language
         )
     await session.commit()
+    if bot is not None and callback.message is not None:
+        try:
+            await set_chat_command_menu(
+                bot,
+                callback.message.chat.id,
+                language,
+                include_dev=DEV_MODE,
+            )
+        except Exception as exc:  # noqa: BLE001 - language choice must still succeed
+            logger.warning(
+                "Failed to sync command menu for chat %s: %s",
+                callback.message.chat.id,
+                exc,
+            )
     await callback.message.edit_text(t("language_changed", language))
     await callback.answer()
     if was_initial:

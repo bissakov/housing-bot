@@ -1,6 +1,9 @@
+import asyncio
 import json
+import logging
 
 from aiogram import Router, F, Bot
+from aiogram.exceptions import TelegramNetworkError
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from sqlalchemy import select, func, case
@@ -30,8 +33,10 @@ from bot.services.request_routing import worker_ready_expression
 from bot.i18n import t, text_variants
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 5
+COMPLETION_ACK_ATTEMPTS = 3
 
 
 def _priority_order():
@@ -42,6 +47,71 @@ def _priority_order():
         Request.is_escalated.desc(),
         Request.created_at.asc(),
     )
+
+
+async def _answer_with_network_retry(message: Message, text: str, **kwargs) -> None:
+    """Retry a completion acknowledgement after transient Telegram failures."""
+    for attempt in range(1, COMPLETION_ACK_ATTEMPTS + 1):
+        try:
+            await message.answer(text, **kwargs)
+            return
+        except TelegramNetworkError:
+            if attempt == COMPLETION_ACK_ATTEMPTS:
+                raise
+            delay = 0.5 * 2 ** (attempt - 1)
+            logger.warning(
+                "telegram_completion_ack_retry attempt=%s delay=%s",
+                attempt,
+                delay,
+            )
+            await asyncio.sleep(delay)
+
+
+async def _acknowledge_completion(
+    message: Message,
+    state: FSMContext,
+    actor: User,
+    req: Request,
+) -> None:
+    result_label = "выполнена" if req.completion_result == "done" else "не выполнена"
+    await _answer_with_network_retry(
+        message,
+        f"Заявка #{req.id} отмечена как «{result_label}».\n\n"
+        f"Комментарий: {escape(req.completion_comment or '—')}",
+        parse_mode="HTML",
+        reply_markup=worker_menu(actor.is_on_shift, actor.language),
+    )
+    # Keep the recovery context until Telegram confirms delivery. If every
+    # attempt fails, the worker's next message can replay this acknowledgement.
+    await state.clear()
+
+
+async def _notify_completion(
+    bot: Bot,
+    session: AsyncSession,
+    actor: User,
+    req: Request,
+) -> None:
+    result_label = "выполнена" if req.completion_result == "done" else "не выполнена"
+    final_comment = req.completion_comment or "—"
+    rres = await session.execute(select(User).where(User.id == req.resident_id))
+    resident = rres.scalar_one_or_none()
+    if resident:
+        icon = "✅" if req.completion_result == "done" else "❌"
+        await notify_resident(
+            bot,
+            session,
+            resident,
+            f"{icon} Ваша заявка #{req.id} {result_label}.\n"
+            f"Комментарий исполнителя: {final_comment}",
+        )
+    await notify_dispatchers(
+        bot,
+        session,
+        f"Заявка #{req.id} {result_label} исполнителем "
+        f"{actor.full_name or actor.telegram_id}.\nКомментарий: {final_comment}",
+    )
+
 
 async def build_worker_available(session: AsyncSession, user: User, page: int) -> tuple[str, InlineKeyboardMarkup]:
     from sqlalchemy import func
@@ -375,6 +445,22 @@ async def handle_completion_comment(
     actor = await get_actor(session, message.from_user.id)
     q = await session.execute(select(Request).where(Request.id == request_id))
     req = q.scalar_one_or_none()
+
+    # A previous delivery attempt may have failed after the database commit.
+    # Treat the closed request as the source of truth and replay its saved
+    # acknowledgement without invoking the LLM or closing/notifying twice.
+    if (
+        is_approved_worker(actor)
+        and req
+        and req.status == "closed"
+        and can_view_assigned_request(actor, req)
+        and req.completion_result == completion_result
+        and req.completion_comment
+    ):
+        await _acknowledge_completion(message, state, actor, req)
+        await _notify_completion(bot, session, actor, req)
+        return
+
     if (
         not is_approved_worker(actor)
         or not req
@@ -430,32 +516,5 @@ async def handle_completion_comment(
         await message.answer(msg)
         return
     await session.commit()
-    await state.clear()
-    result_label = "выполнена" if completion_result == "done" else "не выполнена"
-    await message.answer(
-        f"Заявка #{request_id} отмечена как «{result_label}».\n\n"
-        f"Комментарий: {escape(final_comment)}",
-        parse_mode="HTML",
-        reply_markup=worker_menu(actor.is_on_shift, actor.language),
-    )
-
-    q = await session.execute(select(Request).where(Request.id == request_id))
-    req = q.scalar_one_or_none()
-    if req:
-        rres = await session.execute(select(User).where(User.id == req.resident_id))
-        resident = rres.scalar_one_or_none()
-        if resident:
-            icon = "✅" if completion_result == "done" else "❌"
-            await notify_resident(
-                bot,
-                session,
-                resident,
-                f"{icon} Ваша заявка #{req.id} {result_label}.\n"
-                f"Комментарий исполнителя: {final_comment}",
-            )
-        await notify_dispatchers(
-            bot,
-            session,
-            f"Заявка #{req.id} {result_label} исполнителем "
-            f"{actor.full_name or actor.telegram_id}.\nКомментарий: {final_comment}",
-        )
+    await _acknowledge_completion(message, state, actor, req)
+    await _notify_completion(bot, session, actor, req)

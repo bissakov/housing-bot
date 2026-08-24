@@ -14,13 +14,18 @@ from bot.services.llm import get_llm
 from bot.config import LLM_DUPLICATE_CONFIDENCE_THRESHOLD
 import json
 import logging
-from bot.services.notify import notify_workers, notify_dispatchers
+from bot.services.notify import notify_administrators, notify_workers, notify_dispatchers
 from html import escape
 from bot.auth import is_approved_owner, is_approved_resident
 from bot.callbacks import ResidentRequestCallback
-from bot.constants import URGENCY_LABELS
+from bot.constants import KAZAKHDOMOFON_TEMPLATES, URGENCY_LABELS
 from bot.i18n import category_label, t, text_variants
-from bot.timezone import format_local
+from bot.timezone import format_local, utc_now
+from bot.services.request_routing import (
+    APARTMENT_PAID_NOTICE,
+    CLEANING_NOTICE,
+    next_cleaning_dispatch,
+)
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -283,7 +288,11 @@ async def build_resident_list(session: AsyncSession, resident_db_id: int, page: 
     return text, InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
 async def build_resident_detail(session: AsyncSession, request_id: int, page: int, viewer: User) -> tuple[str, InlineKeyboardMarkup]:
-    q = await session.execute(select(Request).where(Request.id == request_id, Request.resident_id == viewer.id))
+    q = await session.execute(
+        select(Request)
+        .options(selectinload(Request.attachments))
+        .where(Request.id == request_id, Request.resident_id == viewer.id)
+    )
     req = q.scalar_one_or_none()
     if not req:
         return "Заявка не найдена или не ваша.", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data=f"res_list:{page}")]])
@@ -301,9 +310,12 @@ async def build_resident_detail(session: AsyncSession, request_id: int, page: in
         f"{URGENCY_LABELS.get(req.urgency, req.urgency)} приоритет\n\n"
         f"🧰 <b>Исполнитель:</b> {escape(w_str)}\n\n"
         f"📝 <b>Описание</b>\n{escape(req.description)}\n\n"
+        f"{'📍 <b>Место:</b> внутри квартиры' + chr(10) if req.service_area == 'apartment' else ''}"
+        f"{'📍 <b>Место:</b> МОП / общее имущество' + chr(10) if req.service_area == 'common' else ''}"
+        f"{'📎 <b>Вложений:</b> ' + str(len(req.attachments)) + chr(10) if req.attachments else ''}"
         f"🕒 Создана: {format_local(req.created_at, '%d.%m.%Y в %H:%M')}\n"
         f"{('▶️ Принята: ' + format_local(req.accepted_at, '%d.%m.%Y в %H:%M')) if req.accepted_at else ''}\n"
-        f"{('✅ Закрыта: ' + format_local(req.closed_at, '%d.%m.%Y в %H:%M')) if req.closed_at else ''}"
+        f"{('✅ Завершена: ' + format_local(req.closed_at, '%d.%m.%Y в %H:%M')) if req.closed_at else ''}"
     )
     if req.completion_result:
         result_label = "выполнена" if req.completion_result == "done" else "не выполнена"
@@ -312,7 +324,13 @@ async def build_resident_detail(session: AsyncSession, request_id: int, page: in
             f"💬 <b>Комментарий исполнителя:</b> "
             f"{escape(req.completion_comment or '—')}"
         )
-    # Spec: resident can NOT close; only delete own new. Hide Закрыть for resident.
+    if req.approval_status == "pending":
+        text += "\n\n⏳ <b>Ожидает согласования председателя</b>"
+    elif req.approval_status == "approved":
+        text += "\n\n✅ <b>Согласована председателем</b>"
+    elif req.approval_status == "rejected":
+        text += "\n\n❌ <b>Отклонена председателем</b>"
+    # A resident can only delete their own new request; completion is worker-only.
     rows: list[list[InlineKeyboardButton]] = []
     if req.status == "new" and req.resident_id == viewer.id:
         rows.append([InlineKeyboardButton(text="🗑️ Удалить заявку", callback_data=f"delete_req:{req.id}")])
@@ -383,27 +401,64 @@ async def _classify(raw: str, category: str | None):
         return None
 
 
-async def _persist_request(session, user, *, category, description, urgency, raw_description, meta):
+async def _persist_request(
+    session,
+    user,
+    *,
+    category,
+    description,
+    urgency,
+    raw_description,
+    meta,
+    service_area=None,
+    dispatch_after=None,
+    attachments=None,
+):
     llm_meta = json.dumps(meta, ensure_ascii=False) if meta else None
     req = await create_request(
         session, resident_id=user.id, category=category, description=description,
         urgency=urgency, raw_description=raw_description, llm_meta=llm_meta,
+        service_area=service_area, dispatch_after=dispatch_after,
+        attachments=attachments,
     )
     await session.commit()
     return req
 
 
 def _created_text(req: Request, category: str, urgency: str | None, ai: bool) -> str:
+    routing = (
+        "Заявка ожидает согласования председателя."
+        if req.approval_status == "pending"
+        else "Заявка будет направлена исполнителю в рабочее время."
+        if req.dispatch_after is not None
+        else "Мы уведомили подходящих исполнителей."
+    )
     return (
         f"✅ <b>Заявка #{req.id} создана</b>\n\n"
         f"{CATEGORY_LABELS[category]}{' • ✨ обработано ИИ' if ai else ''}\n"
         f"{STATUS_LABELS['new']} • {URGENCY_LABELS.get(urgency or 'normal')} приоритет\n\n"
-        "Мы уведомили подходящих исполнителей. Статус можно проверить в разделе «📋 Мои заявки»."
+        f"{routing} Статус можно проверить в разделе «📋 Мои заявки»."
     )
 
 
 async def _notify_new_request(bot: Bot, session: AsyncSession, req: Request, user: User,
                               category: str, description: str) -> None:
+    if req.approval_status == "pending":
+        await notify_administrators(
+            bot, session,
+            f"📹 Заявка Казахдомофон #{req.id} ожидает согласования.\n"
+            f"Житель: {escape(user.full_name or '')}, кв. {escape(user.apartment or '?')}\n"
+            f"{escape(description)}",
+        )
+        return
+    if category == "cleaning":
+        await notify_administrators(
+            bot, session,
+            f"🧹 Новая заявка клининга #{req.id} (просмотр).\n"
+            f"Кв. {escape(user.apartment or '?')}: {escape(description[:500])}",
+        )
+        if req.dispatch_after is not None:
+            return
     report = await notify_workers(
         bot,
         session,
@@ -429,6 +484,64 @@ async def _notify_new_request(bot: Bot, session: AsyncSession, req: Request, use
         )
 
 
+def _service_area_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🏠 Внутри квартиры", callback_data="req_area:apartment"
+        )],
+        [InlineKeyboardButton(
+            text="🏢 МОП / общее имущество", callback_data="req_area:common"
+        )],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_fsm")],
+    ])
+
+
+def _kazakhdomofon_keyboard() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text=label, callback_data=f"req_kd:{code}")]
+        for code, label in KAZAKHDOMOFON_TEMPLATES.items()
+    ]
+    rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_fsm")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _create_direct_request(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    bot: Bot,
+    *,
+    user: User,
+    category: str,
+    description: str,
+    service_area: str | None = None,
+    dispatch_after=None,
+    attachments: list[dict[str, str]] | None = None,
+) -> Request:
+    req = await _persist_request(
+        session,
+        user,
+        category=category,
+        description=description,
+        urgency=None,
+        raw_description=None,
+        meta=None,
+        service_area=service_area,
+        dispatch_after=dispatch_after,
+        attachments=attachments,
+    )
+    await state.clear()
+    await message.answer(
+        _created_text(req, category, None, False),
+        parse_mode="HTML",
+        reply_markup=resident_menu(
+            user.language, is_owner=user.resident_subrole == "owner"
+        ),
+    )
+    await _notify_new_request(bot, session, req, user, category, description)
+    return req
+
+
 def _suggestion_keyboard(can_recategorize: bool) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="✅ Создать заявку", callback_data="req_ai:accept")],
@@ -448,7 +561,38 @@ async def choose_category(callback: CallbackQuery, state: FSMContext, session: A
     if category not in CATEGORY_LABELS:
         await callback.answer(t("unknown_category", language))
         return
+    if not user:
+        await callback.answer("Ошибка пользователя", show_alert=True)
+        return
     data = await state.get_data()
+    if category in {"electrician", "plumber"}:
+        await state.set_state(RequestStates.waiting_service_area)
+        await state.update_data(category=category, llm_intake=False)
+        await callback.message.edit_text(
+            "Где требуется выполнить работу?",
+            reply_markup=_service_area_keyboard(),
+        )
+        await callback.answer()
+        return
+    if category == "kazakhdomofon":
+        await state.set_state(RequestStates.waiting_category)
+        await state.set_data({"category": category})
+        await callback.message.edit_text(
+            "Выберите тип заявки Казахдомофон:",
+            reply_markup=_kazakhdomofon_keyboard(),
+        )
+        await callback.answer()
+        return
+    if category == "cleaning":
+        await state.set_state(RequestStates.waiting_media)
+        await state.set_data({"category": category})
+        await callback.message.edit_text(
+            "Отправьте фото или видео загрязнения. В подписи обязательно "
+            "укажите точное место и описание (минимум 10 символов).",
+            reply_markup=cancel_keyboard(user.language),
+        )
+        await callback.answer()
+        return
     pending_raw = data.get("pending_raw")
 
     # The description was already collected (LLM outage fallback, or "другая
@@ -491,6 +635,182 @@ async def choose_category(callback: CallbackQuery, state: FSMContext, session: A
     )
     await state.set_state(RequestStates.waiting_description)
     await callback.answer()
+
+
+@router.callback_query(RequestStates.waiting_service_area, F.data.startswith("req_area:"))
+async def choose_service_area(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    bot: Bot,
+):
+    area = callback.data.split(":", 1)[1]
+    if area not in {"apartment", "common"}:
+        await callback.answer("Неизвестное место", show_alert=True)
+        return
+    user = await _load_resident(session, callback.from_user.id)
+    if not user:
+        await callback.answer("Ошибка пользователя", show_alert=True)
+        return
+    data = await state.get_data()
+    await state.update_data(service_area=area)
+    pending_raw = data.get("pending_raw")
+    if pending_raw:
+        category = data.get("category")
+        description = data.get("pending_enriched") or pending_raw
+        meta = data.get("pending_meta")
+        if meta:
+            meta = {**meta, "category_source": "manual"}
+        urgency = data.get("pending_urgency")
+        req = await _persist_request(
+            session,
+            user,
+            category=category,
+            description=description,
+            urgency=urgency,
+            raw_description=pending_raw if description != pending_raw else None,
+            meta=meta,
+            service_area=area,
+        )
+        await state.clear()
+        await callback.message.edit_text(
+            _created_text(req, category, urgency, bool(meta)), parse_mode="HTML"
+        )
+        await callback.message.answer(
+            "Исполнители на смене получили уведомление.",
+            reply_markup=resident_menu(
+                user.language, is_owner=user.resident_subrole == "owner"
+            ),
+        )
+        await _notify_new_request(
+            bot, session, req, user, category, description
+        )
+        await callback.answer()
+        return
+    await state.set_state(RequestStates.waiting_description)
+    prompt = (
+        APARTMENT_PAID_NOTICE
+        + "\n\nТеперь опишите требуемую работу и точное место."
+        if area == "apartment"
+        else "Опишите проблему в МОП и укажите точное место."
+    )
+    await callback.message.edit_text(
+        prompt, parse_mode="HTML", reply_markup=cancel_keyboard(user.language)
+    )
+    await callback.answer()
+
+
+@router.callback_query(RequestStates.waiting_category, F.data.startswith("req_kd:"))
+async def choose_kazakhdomofon_template(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    bot: Bot,
+):
+    template_code = callback.data.split(":", 1)[1]
+    description = KAZAKHDOMOFON_TEMPLATES.get(template_code)
+    user = await _load_resident(session, callback.from_user.id)
+    if not description or not user:
+        await callback.answer("Заявка недоступна", show_alert=True)
+        return
+    if template_code == "face_id":
+        await state.set_state(RequestStates.waiting_media)
+        await state.set_data({
+            "category": "kazakhdomofon",
+            "template_code": template_code,
+            "description": description,
+        })
+        await callback.message.edit_text(
+            "Отправьте одну фотографию для добавления Face ID.",
+            reply_markup=cancel_keyboard(user.language),
+        )
+        await callback.answer()
+        return
+    await _create_direct_request(
+        callback.message,
+        state,
+        session,
+        bot,
+        user=user,
+        category="kazakhdomofon",
+        description=description,
+    )
+    await callback.answer()
+
+
+@router.message(RequestStates.waiting_media, F.photo | F.video)
+async def input_request_media(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    bot: Bot,
+):
+    data = await state.get_data()
+    category = data.get("category")
+    user = await _load_resident(session, message.from_user.id)
+    if not user:
+        await state.clear()
+        await message.answer("Ошибка пользователя")
+        return
+    if message.photo:
+        media = message.photo[-1]
+        attachment = {
+            "file_id": media.file_id,
+            "file_unique_id": media.file_unique_id,
+            "media_type": "photo",
+        }
+    else:
+        media = message.video
+        attachment = {
+            "file_id": media.file_id,
+            "file_unique_id": media.file_unique_id,
+            "media_type": "video",
+        }
+    if category == "kazakhdomofon":
+        if attachment["media_type"] != "photo":
+            await message.answer("Для Face ID нужна фотография, не видео.")
+            return
+        await _create_direct_request(
+            message,
+            state,
+            session,
+            bot,
+            user=user,
+            category=category,
+            description=data.get("description") or "Добавление Face ID",
+            attachments=[attachment],
+        )
+        return
+    if category != "cleaning":
+        await state.clear()
+        await message.answer("Форма устарела, начните создание заявки заново.")
+        return
+    description = (message.caption or "").strip()
+    if len(description) < MIN_DESCRIPTION_LEN:
+        await message.answer(
+            "Добавьте к фото или видео подпись с точным местом и описанием "
+            "(минимум 10 символов)."
+        )
+        return
+    dispatch_after = next_cleaning_dispatch(utc_now())
+    if dispatch_after is not None:
+        await message.answer(CLEANING_NOTICE)
+    await _create_direct_request(
+        message,
+        state,
+        session,
+        bot,
+        user=user,
+        category=category,
+        description=description,
+        dispatch_after=dispatch_after,
+        attachments=[attachment],
+    )
+
+
+@router.message(RequestStates.waiting_media)
+async def require_request_media(message: Message):
+    await message.answer("Отправьте фото или видео согласно подсказке выше.")
 
 
 @router.message(RequestStates.waiting_description, F.text)
@@ -640,7 +960,7 @@ async def _finalize_from_message(message: Message, state: FSMContext, session: A
 
 
 async def _duplicate_candidates(session: AsyncSession, user: User, category: str) -> list[dict]:
-    """Fetch only recent active candidates; closed requests cannot block filing."""
+    """Fetch only recent active candidates; completed requests cannot block filing."""
     result = await session.execute(
         select(Request)
         .where(Request.status.in_(("new", "accepted")))
@@ -664,6 +984,7 @@ async def _start_duplicate_check(
     message: Message, state: FSMContext, session: AsyncSession, user: User,
     *, category: str, description: str, urgency, raw_description, meta,
 ) -> bool:
+    state_data = await state.get_data()
     candidates = await _duplicate_candidates(session, user, category)
     if not candidates:
         return False
@@ -685,6 +1006,7 @@ async def _start_duplicate_check(
     await state.update_data(duplicate_draft={
         "category": category, "description": description, "urgency": urgency,
         "raw_description": raw_description, "meta": meta,
+        "service_area": state_data.get("service_area"),
         "candidate_ids": [candidate["id"] for candidate in candidates],
     })
     await state.set_state(RequestStates.waiting_duplicate_clarification)
@@ -699,9 +1021,11 @@ async def _create_checked_request(
     message: Message, state: FSMContext, session: AsyncSession, bot: Bot,
     *, user: User, category: str, description: str, urgency, raw_description, meta,
 ):
+    state_data = await state.get_data()
     req = await _persist_request(
         session, user, category=category, description=description,
         urgency=urgency, raw_description=raw_description, meta=meta,
+        service_area=state_data.get("service_area"),
     )
     await state.clear()
     await message.answer(
@@ -791,6 +1115,7 @@ async def resolve_duplicate(callback: CallbackQuery, state: FSMContext, session:
     req = await _persist_request(
         session, user, category=draft["category"], description=draft["description"],
         urgency=draft.get("urgency"), raw_description=draft.get("raw_description"), meta=meta,
+        service_area=draft.get("service_area"),
     )
     await state.clear()
     await callback.message.edit_text(

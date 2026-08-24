@@ -59,7 +59,9 @@ def worker_menu(is_on_shift: bool, language: str = DEFAULT_LANGUAGE) -> ReplyKey
     )
 
 
-def dispatcher_menu(language: str = DEFAULT_LANGUAGE) -> ReplyKeyboardMarkup:
+def dispatcher_menu(
+    language: str = DEFAULT_LANGUAGE, *, chairman: bool = False
+) -> ReplyKeyboardMarkup:
     language = normalize_language(language)
     b = ReplyKeyboardBuilder()
     labels = tuple(t(key, language) for key in (
@@ -69,11 +71,16 @@ def dispatcher_menu(language: str = DEFAULT_LANGUAGE) -> ReplyKeyboardMarkup:
     ))
     for label in labels[:7]:
         b.button(text=label)
-    b.adjust(2, 2, 2)
+    if chairman:
+        b.button(text=t("participants", language))
+    b.adjust(2, 2, 2, 2 if chairman else 1)
     return b.as_markup(
         resize_keyboard=True,
         is_persistent=True,
-        input_field_placeholder=labels[7],
+        input_field_placeholder=(
+            "Панель председателя" if chairman and normalize_language(language) == "ru"
+            else "Төраға панелі" if chairman else labels[7]
+        ),
     )
 
 
@@ -108,7 +115,7 @@ def registration_worker_category_keyboard(language: str = DEFAULT_LANGUAGE) -> I
     return b.as_markup()
 
 def admin_menu() -> ReplyKeyboardMarkup:
-    return dispatcher_menu()
+    return dispatcher_menu(chairman=True)
 
 
 def request_claim_keyboard(request_id: int) -> InlineKeyboardMarkup:
@@ -130,11 +137,12 @@ def dispatcher_request_keyboard(
     status: str,
     *,
     can_delete: bool = False,
+    can_assign: bool = True,
 ) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    if status == "new":
+    if can_assign and status == "new":
         b.button(text="👤 Назначить", callback_data=f"assign:{request_id}")
-    elif status == "accepted":
+    elif can_assign and status == "accepted":
         b.button(text="🔄 Переназначить", callback_data=f"reassign:{request_id}")
     if can_delete:
         b.button(text="🗑️ Удалить", callback_data=f"delete_req:{request_id}")

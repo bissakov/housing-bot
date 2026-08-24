@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.models import User, Request, Announcement, RequestEvent
 from bot.config import DEV_MODE
+from bot.constants import CATEGORY_LABELS
 import logging
 from bot.handlers.common import get_main_keyboard
 logger = logging.getLogger(__name__)
@@ -22,7 +23,7 @@ ROLE_OPTIONS = [
     ("worker:plumber", "🚿 Сантехник"),
     ("worker:security", "🛡️ Охрана"),
     ("dispatcher", "🎛️ Диспетчер"),
-    ("administrator", "🛡️ Администратор"),
+    ("administrator", "🛡️ Председатель"),
 ]
 
 def dev_keyboard(current: str) -> InlineKeyboardMarkup:
@@ -76,7 +77,7 @@ async def dev_switch(callback: CallbackQuery, session: AsyncSession, bot: Bot):
         user.worker_category = cat
         user.is_approved = True
         # FIX: /dev used to flip only role/category — full_name stayed "Admin" from the
-        # initial ADMIN_IDS /dispatcher row, so claim/close notifications kept saying "Admin".
+        # initial ADMIN_IDS /dispatcher row, so claim/completion notifications kept saying "Admin".
         # If stale, replace with real Telegram name.
         if not user.full_name or user.full_name.strip().lower() == "admin":
             tg_name = (callback.from_user.full_name or callback.from_user.first_name or "").strip()
@@ -109,9 +110,12 @@ async def dev_switch(callback: CallbackQuery, session: AsyncSession, bot: Bot):
         "resident": "Житель",
         "worker": "Исполнитель",
         "dispatcher": "Диспетчер",
-        "administrator": "Администратор",
+        "administrator": "Председатель",
     }.get(user.role, user.role)
-    extra = f" ({user.worker_category})" if user.role == "worker" else ""
+    extra = (
+        f" ({CATEGORY_LABELS.get(user.worker_category, 'Неизвестная категория')})"
+        if user.role == "worker" else ""
+    )
     await callback.message.edit_text(f"✅ Роль → <b>{role_label}{extra}</b>\nМеню обновлено.", parse_mode="HTML")
     await callback.message.answer(f"Главное меню | Роль: {role_label}{extra}", reply_markup=kb)
     await callback.answer(f"Switched to {choice}")

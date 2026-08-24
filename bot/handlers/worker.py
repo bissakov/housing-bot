@@ -23,8 +23,9 @@ from bot.callbacks import WorkerAvailableCallback, WorkerAssignedCallback
 from bot.constants import URGENCY_LABELS
 from bot.services.llm import get_llm
 from bot.states import WorkerCompletionStates
-from bot.timezone import format_local
+from bot.timezone import format_local, utc_now
 from bot.services.schedules import get_schedule_status
+from bot.services.request_routing import worker_ready_expression
 from bot.i18n import t, text_variants
 
 router = Router()
@@ -44,14 +45,17 @@ def _priority_order():
 async def build_worker_available(session: AsyncSession, user: User, page: int) -> tuple[str, InlineKeyboardMarkup]:
     from sqlalchemy import func
     # total new of this category
-    total_res = await session.execute(select(func.count()).select_from(Request).where(Request.category == user.worker_category, Request.status == "new"))
+    ready = worker_ready_expression(utc_now())
+    total_res = await session.execute(select(func.count()).select_from(Request).where(
+        Request.category == user.worker_category, Request.status == "new", *ready
+    ))
     total = total_res.scalar() or 0
     total_pages = (total + PAGE_SIZE - 1) // PAGE_SIZE if total else 1
     page = max(0, min(page, total_pages - 1))
     q = await session.execute(
         select(Request)
         .options(selectinload(Request.resident))
-        .where(Request.category == user.worker_category, Request.status == "new")
+        .where(Request.category == user.worker_category, Request.status == "new", *ready)
         .order_by(*_priority_order()).limit(PAGE_SIZE).offset(page * PAGE_SIZE)
     )
     reqs = q.scalars().all()
@@ -203,10 +207,15 @@ async def w_av_view(
     callback: CallbackQuery,
     callback_data: WorkerAvailableCallback,
     session: AsyncSession,
+    bot: Bot,
 ):
     req_id = callback_data.request_id
     page = callback_data.page
-    q = await session.execute(select(Request).where(Request.id == req_id))
+    q = await session.execute(
+        select(Request)
+        .options(selectinload(Request.attachments))
+        .where(Request.id == req_id)
+    )
     req = q.scalar_one_or_none()
     if not req:
         await callback.answer("Не найдена", show_alert=True)
@@ -224,6 +233,9 @@ async def w_av_view(
         f"📍 <b>Адрес:</b> {escape(addr)}\n"
         f"👤 <b>Житель:</b> {escape(resident.full_name if resident else '—')}\n\n"
         f"📝 <b>Описание</b>\n{escape(req.description)}\n\n"
+        f"{'📍 <b>Место:</b> внутри квартиры' + chr(10) if req.service_area == 'apartment' else ''}"
+        f"{'📍 <b>Место:</b> МОП / общее имущество' + chr(10) if req.service_area == 'common' else ''}"
+        f"{'📎 <b>Вложений:</b> ' + str(len(req.attachments)) + chr(10) if req.attachments else ''}"
         f"🕒 Создана: {format_local(req.created_at, '%d.%m.%Y в %H:%M')}"
     )
     # keep pagination back + claim
@@ -232,6 +244,16 @@ async def w_av_view(
         [InlineKeyboardButton(text="◀️ К списку", callback_data=f"w_av_list:{page}")],
     ])
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    for attachment in req.attachments:
+        try:
+            if attachment.media_type == "photo":
+                await bot.send_photo(callback.from_user.id, attachment.file_id)
+            elif attachment.media_type == "video":
+                await bot.send_video(callback.from_user.id, attachment.file_id)
+            else:
+                await bot.send_document(callback.from_user.id, attachment.file_id)
+        except Exception:
+            pass
     await callback.answer()
 
 

@@ -4,7 +4,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from sqlalchemy import select
 
 from bot.handlers.common import cmd_start, set_language
-from bot.i18n import SUPPORTED_LANGUAGES, TEXTS, category_label, normalize_language, t, text_variants
+from bot.i18n import SUPPORTED_LANGUAGES, TEXTS, category_label, normalize_language, role_label, status_label, t, text_variants
 from bot.keyboards import cancel_keyboard, dispatcher_menu, resident_menu, worker_menu
 from bot.keyboards import reply_cancel_keyboard
 from bot.models import User
@@ -24,6 +24,24 @@ def test_kazakh_is_default_language():
 def test_regional_language_codes_are_normalized():
     assert normalize_language("ru-RU") == "ru"
     assert normalize_language("kk_KZ") == "kk"
+
+
+def test_completed_status_uses_completion_wording():
+    assert status_label("closed", "ru") == "✅ Завершена"
+    assert status_label("closed", "kk") == "✅ Аяқталды"
+
+
+def test_administrator_is_presented_as_chairman():
+    assert t("role_administrator", "ru") == "Председатель"
+    chairman_texts = {
+        button.text
+        for row in dispatcher_menu("ru", chairman=True).keyboard
+        for button in row
+    }
+    assert "👥 Участники" in chairman_texts
+    assert role_label("dispatcher", "ru") == "Диспетчер"
+    assert role_label("resident", "ru") == "Житель"
+    assert role_label("unknown_internal_code", "ru") == "Неизвестная роль"
 
 
 def test_every_message_is_translated_into_every_supported_language():

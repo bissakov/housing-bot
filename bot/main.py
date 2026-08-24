@@ -9,7 +9,7 @@ from bot.config import BOT_TOKEN, DEV_MODE, REDIS_URL, get_settings
 from bot.services.llm import init_llm
 from bot.database import async_session, init_db, close_db
 from bot.middlewares import DbSessionMiddleware
-from bot.handlers import common, resident, worker, dispatcher
+from bot.handlers import chairman, common, resident, worker, dispatcher
 from bot.services.scheduler import setup_scheduler
 
 logging.basicConfig(level=logging.INFO)
@@ -45,6 +45,7 @@ async def main():
     dp.include_router(common.router)
     dp.include_router(resident.router)
     dp.include_router(worker.router)
+    dp.include_router(chairman.router)
     dp.include_router(dispatcher.router)
 
     # DEV-only router: /dev switch (guarded at handler level, but only include when DEV_MODE)

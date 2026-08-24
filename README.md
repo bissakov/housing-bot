@@ -123,9 +123,27 @@ in-progress registration and request forms survive bot restarts. Without a
 ## Roles flow
 
 - **Resident**: `/start` -> ФИО + квартира -> 📝 Создать заявку -> выбор категории -> описание -> уведомления
-- **Worker**: диспетчер добавляет по Telegram ID + категория -> `▶️ На смену` -> 📋 Доступные заявки -> Принять (атомарный claim) -> 🔧 Мои заявки -> Закрыть
+- **Worker**: диспетчер добавляет по Telegram ID + категория -> `▶️ На смену` -> 📋 Доступные заявки -> Принять (атомарный claim) -> 🔧 Мои заявки -> Завершить с результатом «выполнено» или «не выполнено»
 - **Dispatcher**: 📋 Все заявки (пагинация) -> Назначить/Переназначить -> ➕ Добавить исполнителя -> 📢 Создать объявление (broadcast)
-- **Administrator**: all dispatcher access plus authorized destructive actions, including deleting any request or announcement; `ADMIN_IDS` users are bootstrapped into this role
+- **Chairman**: the existing internal `administrator` role shown under the
+  client-facing name «Председатель». It inherits all dispatcher access, can
+  approve Kazakhdomofon work, revoke participant access, and perform authorized
+  destructive actions. `ADMIN_IDS` users are bootstrapped into this role.
+
+## Additional service requests
+
+- Cleaning and Kazakhdomofon reuse the normal worker claim/completion workflow.
+- Kazakhdomofon offers fixed Face ID, camera, and magnet request templates.
+  Face ID requires one photo and the chairman must approve the request before
+  it enters the Kazakhdomofon queue.
+- Cleaning requires a photo or video with a location in the caption. Requests
+  outside Monday-Friday 08:00-13:00 and Saturday 08:00-12:00 are deferred to
+  the next opening; Sunday requests are released Monday at 08:00. No public
+  holiday calendar is applied.
+- Plumber and electrician requests record either apartment or common-property
+  work. Apartment work displays the configured bilingual paid-service notice.
+- Telegram media remains hosted by Telegram; the database stores reusable file
+  identifiers rather than downloading the files.
 
 ## Worker schedules and current time
 
@@ -152,7 +170,7 @@ APScheduler every 1 min checks `status='new'` older than 20 min -> notify dispat
 ## LLM duplicate checks and dynamic priority
 
 - Before saving, the bot compares a draft with at most 12 active requests in
-  the same category. Closed requests never block creation.
+  the same category. Completed requests never block creation.
 - On a possible match, the LLM asks the resident one distinguishing question.
   A duplicate is blocked only after that answer and only at confidence
   `LLM_DUPLICATE_CONFIDENCE_THRESHOLD` or higher (default `0.92`). The resident
@@ -160,5 +178,5 @@ APScheduler every 1 min checks `status='new'` older than 20 min -> notify dispat
 - An unavailable LLM or an ambiguous result is fail-open: the request is
   created so a genuinely new incident is not lost.
 - Worker queues are dynamically sorted by `high`, `normal`, then `low`, with
-  escalated and older requests first within a priority. Closing a higher
+  escalated and older requests first within a priority. Completing a higher
   priority task therefore promotes the next task without another LLM call.

@@ -45,10 +45,11 @@ from bot.services.reports import (
 )
 from bot.timezone import format_local
 from bot.config import DISPLAY_TIMEZONE
-from bot.i18n import category_label, normalize_language, t, text_variants
+from bot.i18n import category_label, normalize_language, role_label, t, text_variants
 
 router = Router()
 logger = logging.getLogger(__name__)
+
 
 @router.callback_query(F.data == "cancel_fsm")
 async def dispatcher_cancel_cb(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
@@ -222,7 +223,7 @@ async def build_dispatcher_list(
             callback_data=f"disp_filter:0:accepted:{category}",
         ),
         InlineKeyboardButton(
-            text=("✅ " if status == "closed" else "") + "Закрытые",
+            text=("✅ " if status == "closed" else "") + "Завершённые",
             callback_data=f"disp_filter:0:closed:{category}",
         ),
     ])
@@ -248,7 +249,11 @@ async def build_request_detail(
     *,
     can_delete: bool = False,
 ) -> tuple[str, InlineKeyboardMarkup]:
-    q = await session.execute(select(Request).where(Request.id == request_id))
+    q = await session.execute(
+        select(Request)
+        .options(selectinload(Request.attachments))
+        .where(Request.id == request_id)
+    )
     req = q.scalar_one_or_none()
     if not req:
         return "Заявка не найдена.", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data=f"disp_list:{page}")]])
@@ -268,9 +273,12 @@ async def build_request_detail(
         f" • кв. {escape(resident.apartment or '?') if resident else '?'}\n"
         f"🧰 <b>Исполнитель:</b> {escape(w.full_name or str(w.telegram_id)) if w else 'не назначен'}\n\n"
         f"📝 <b>Описание</b>\n{escape(req.description)}\n\n"
+        f"{'📍 <b>Место:</b> внутри квартиры' + chr(10) if req.service_area == 'apartment' else ''}"
+        f"{'📍 <b>Место:</b> МОП / общее имущество' + chr(10) if req.service_area == 'common' else ''}"
+        f"{'📎 <b>Вложений:</b> ' + str(len(req.attachments)) + chr(10) if req.attachments else ''}"
         f"🕒 Создана: {format_local(req.created_at, '%d.%m.%Y в %H:%M')}\n"
         f"{('▶️ Принята: ' + format_local(req.accepted_at, '%d.%m.%Y в %H:%M')) if req.accepted_at else ''}\n"
-        f"{('✅ Закрыта: ' + format_local(req.closed_at, '%d.%m.%Y в %H:%M')) if req.closed_at else ''}"
+        f"{('✅ Завершена: ' + format_local(req.closed_at, '%d.%m.%Y в %H:%M')) if req.closed_at else ''}"
     )
 
     llm_flag = " ✨ ИИ" if getattr(req, "llm_meta", None) else ""
@@ -283,16 +291,36 @@ async def build_request_detail(
             f"💬 <b>Комментарий исполнителя:</b> "
             f"{escape(req.completion_comment or '—')}"
         )
+    if req.approval_status:
+        approval_labels = {
+            "pending": "⏳ ожидает согласования председателя",
+            "approved": "✅ согласована председателем",
+            "rejected": "❌ отклонена председателем",
+        }
+        text += f"\n\n<b>Согласование:</b> {approval_labels[req.approval_status]}"
+        if req.approval_comment:
+            text += f"\n<b>Комментарий:</b> {escape(req.approval_comment)}"
     # Start from existing dispatcher_request_keyboard but add back button
     base_kb = dispatcher_request_keyboard(
         req.id,
         req.status,
         can_delete=can_delete,
+        can_assign=req.category != "cleaning" and req.approval_status != "pending",
     )
     # base_kb has rows of 1 button each (or 2), we keep them
     rows = [list(row) for row in base_kb.inline_keyboard]
+    if can_delete and req.approval_status == "pending":
+        rows.insert(0, [
+            InlineKeyboardButton(
+                text="✅ Согласовать", callback_data=f"request_approve:{req.id}"
+            ),
+            InlineKeyboardButton(
+                text="❌ Отклонить", callback_data=f"request_reject:{req.id}"
+            ),
+        ])
     # insert ✨ row after action rows, before back
-    rows.insert(len(rows), [InlineKeyboardButton(text="✨ ИИ-триаж", callback_data=f"ai_triage:{req.id}")])
+    if req.category not in {"cleaning", "kazakhdomofon"}:
+        rows.insert(len(rows), [InlineKeyboardButton(text="✨ ИИ-триаж", callback_data=f"ai_triage:{req.id}")])
     rows.append([
         InlineKeyboardButton(
             text="🕓 История",
@@ -304,6 +332,31 @@ async def build_request_detail(
     # add back row
     rows.append([InlineKeyboardButton(text="◀️ К списку", callback_data=f"disp_list:{page}")])
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _send_request_attachments(
+    bot: Bot, session: AsyncSession, chat_id: int, request_id: int
+) -> None:
+    result = await session.execute(
+        select(Request)
+        .options(selectinload(Request.attachments))
+        .where(Request.id == request_id)
+    )
+    request = result.scalar_one_or_none()
+    if not request:
+        return
+    for attachment in request.attachments:
+        try:
+            if attachment.media_type == "photo":
+                await bot.send_photo(chat_id, attachment.file_id)
+            elif attachment.media_type == "video":
+                await bot.send_video(chat_id, attachment.file_id)
+            else:
+                await bot.send_document(chat_id, attachment.file_id)
+        except Exception:
+            logger.exception(
+                "request_attachment_delivery_failed request_id=%s", request_id
+            )
 
 
 @router.message(F.text.in_(text_variants("summary")))
@@ -324,7 +377,10 @@ def _report_filters(callback_data: ReportCallback) -> ReportFilters:
 
     return ReportFilters(
         period=decode({"today": "t", "yesterday": "y", "7d": "7", "30d": "30", "month": "m", "prev_month": "pm", "custom": "c"}, callback_data.period),
-        category=decode({"all": "a", "electrician": "e", "plumber": "p", "security": "s"}, callback_data.category),
+        category=decode({
+            "all": "a", "electrician": "e", "plumber": "p",
+            "security": "s", "cleaning": "c", "kazakhdomofon": "k",
+        }, callback_data.category),
         urgency=decode({"all": "a", "high": "h", "normal": "n", "low": "l", "none": "x"}, callback_data.urgency),
         worker_id=callback_data.worker_id,
         result=decode({"all": "a", "done": "d", "not_done": "n", "none": "x"}, callback_data.result),
@@ -500,6 +556,7 @@ async def req_view(
     callback: CallbackQuery,
     callback_data: DispatcherRequestCallback,
     session: AsyncSession,
+    bot: Bot,
 ):
     req_id = callback_data.request_id
     page = callback_data.page
@@ -515,6 +572,7 @@ async def req_view(
         can_delete=is_administrator(user),
     )
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await _send_request_attachments(bot, session, callback.from_user.id, req_id)
     await callback.answer()
 
 
@@ -523,6 +581,7 @@ async def filtered_req_view(
     callback: CallbackQuery,
     callback_data: DispatcherFilteredRequestCallback,
     session: AsyncSession,
+    bot: Bot,
 ):
     result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
     user = result.scalar_one_or_none()
@@ -546,6 +605,9 @@ async def filtered_req_view(
     await callback.message.edit_text(
         text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
     )
+    await _send_request_attachments(
+        bot, session, callback.from_user.id, callback_data.request_id
+    )
     await callback.answer()
 
 
@@ -558,7 +620,8 @@ async def request_history(
     actor_result = await session.execute(
         select(User).where(User.telegram_id == callback.from_user.id)
     )
-    if not _is_dispatcher(actor_result.scalar_one_or_none()):
+    viewer = actor_result.scalar_one_or_none()
+    if not _is_dispatcher(viewer):
         await callback.answer("Нет прав", show_alert=True)
         return
 
@@ -571,10 +634,12 @@ async def request_history(
     events = result.scalars().all()
     action_labels = {
         "created": "создана",
+        "approved": "согласована председателем",
+        "rejected": "отклонена председателем",
         "claimed": "принята исполнителем",
         "assigned": "назначена",
         "reassigned": "переназначена",
-        "closed": "закрыта",
+        "closed": "завершена",
         "deleted": "удалена",
     }
     lines = [f"🕓 <b>История заявки #{callback_data.request_id}</b>"]
@@ -585,7 +650,36 @@ async def request_history(
         actor = "система"
         if event.actor:
             actor = event.actor.full_name or str(event.actor.telegram_id)
-        detail = f" — {escape(event.details)}" if event.details else ""
+        detail_values: list[str] = []
+        for item in (event.details or "").split(";"):
+            key, separator, value = item.partition("=")
+            if not separator:
+                continue
+            if key == "category":
+                detail_values.append(
+                    f"категория: {category_label(value, viewer.language)}"
+                )
+            elif key == "completion_result":
+                result = {
+                    "done": "выполнено", "not_done": "не выполнено",
+                }.get(value, "неизвестно")
+                detail_values.append(f"результат: {result}")
+            elif key == "worker_id":
+                detail_values.append(f"исполнитель: №{value}")
+            elif key == "previous_worker_id":
+                detail_values.append(f"предыдущий исполнитель: №{value}")
+            elif key == "by":
+                source = {
+                    "administrator": "председатель", "resident": "житель",
+                }.get(value, "неизвестно")
+                detail_values.append(f"удалил: {source}")
+            elif key == "demo":
+                detail_values.append(
+                    f"демо-данные: {'да' if value == 'true' else 'нет'}"
+                )
+        detail = (
+            f" — {escape('; '.join(detail_values))}" if detail_values else ""
+        )
         lines.append(
             f"• {timestamp}: {action_labels.get(event.action, escape(event.action))} "
             f"({escape(actor)}){detail}"
@@ -630,6 +724,14 @@ async def start_assign(callback: CallbackQuery, session: AsyncSession):
     req = q.scalar_one_or_none()
     if not req:
         await callback.answer("Заявка не найдена", show_alert=True)
+        return
+    if req.category == "cleaning":
+        await callback.answer(
+            "Заявку клининга принимает сам клининг", show_alert=True
+        )
+        return
+    if req.approval_status == "pending":
+        await callback.answer("Сначала согласуйте заявку", show_alert=True)
         return
     wres = await session.execute(select(User).where(User.role == "worker", User.worker_category == req.category, User.is_approved.is_(True)))
     workers = wres.scalars().all()
@@ -691,7 +793,9 @@ async def cancel_assign(callback: CallbackQuery):
 
 PEND_PAGE_SIZE = 5
 
-async def build_pending_list(session: AsyncSession, page: int) -> tuple[str, InlineKeyboardMarkup]:
+async def build_pending_list(
+    session: AsyncSession, page: int, language: str | None = None
+) -> tuple[str, InlineKeyboardMarkup]:
     pending_filter = (
         User.is_approved.is_(False),
         ~((User.role == "resident") & (User.resident_subrole == "tenant")),
@@ -708,8 +812,17 @@ async def build_pending_list(session: AsyncSession, page: int) -> tuple[str, Inl
         return "✅ Нет ожидающих подтверждения.", InlineKeyboardMarkup(inline_keyboard=[])
     lines = [f"⏳ <b>На подтверждение</b> — стр {page+1}/{total_pages} (всего {total})\nНажмите 📄 чтобы открыть карточку\n"]
     for u in pending:
-        role_label = {"resident": "Житель", "worker": "Исполнитель"}.get(u.role, u.role)
-        lines.append(f"<b>#{u.id}</b> {role_label} • TG <code>{u.telegram_id}</code> • {format_local(u.created_at, '%d.%m %H:%M', '')}\n{u.full_name or '—'} кв.{u.apartment or '—'} {f'({u.worker_category})' if u.worker_category else ''}\n")
+        public_role = role_label(u.role, language)
+        worker_category = (
+            f"({category_label(u.worker_category, language)})"
+            if u.worker_category else ""
+        )
+        lines.append(
+            f"<b>#{u.id}</b> {public_role} • TG <code>{u.telegram_id}</code> • "
+            f"{format_local(u.created_at, '%d.%m %H:%M', '')}\n"
+            f"{escape(u.full_name or '—')} кв.{escape(u.apartment or '—')} "
+            f"{worker_category}\n"
+        )
     text = "\n".join(lines)
     rows: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
@@ -730,18 +843,20 @@ async def build_pending_list(session: AsyncSession, page: int) -> tuple[str, Inl
         rows.append(pag)
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
-async def build_pending_detail(session: AsyncSession, user_id: int, page: int) -> tuple[str, InlineKeyboardMarkup]:
+async def build_pending_detail(
+    session: AsyncSession, user_id: int, page: int, language: str | None = None
+) -> tuple[str, InlineKeyboardMarkup]:
     res = await session.execute(select(User).where(User.id == user_id))
     u = res.scalar_one_or_none()
     if not u:
         return "Не найден.", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data=f"pend_list:{page}")]])
-    role_label = {"resident": "Житель", "worker": "Исполнитель"}.get(u.role, u.role)
+    public_role = role_label(u.role, language)
     text = (
-        f"⏳ {role_label} на подтверждение\n"
+        f"⏳ {public_role} на подтверждение\n"
         f"ID: {u.id} | TG: <code>{u.telegram_id}</code>\n"
-        f"Имя: {u.full_name or '—'} | Кв: {u.apartment or '—'}\n"
-        f"Категория: {u.worker_category or '—'}\n"
-        f"Роль: {u.role} | Одобрен: {u.is_approved}\n"
+        f"Имя: {escape(u.full_name or '—')} | Кв: {escape(u.apartment or '—')}\n"
+        f"Категория: {category_label(u.worker_category, language) or '—'}\n"
+        f"Роль: {public_role} | Одобрен: {t('yes' if u.is_approved else 'no', language)}\n"
         f"Создан: {format_local(u.created_at, '%d.%m %H:%M')}"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -759,7 +874,7 @@ async def pending_approvals(message: Message, session: AsyncSession):
     if not viewer or not _is_dispatcher(viewer):
         await message.answer("Только для диспетчеров.")
         return
-    text, kb = await build_pending_list(session, page=0)
+    text, kb = await build_pending_list(session, page=0, language=viewer.language)
     await message.answer(text, parse_mode="HTML", reply_markup=kb)
 
 @router.callback_query(F.data.startswith("pend_list:"))
@@ -770,7 +885,7 @@ async def pend_list(callback: CallbackQuery, session: AsyncSession):
     if not viewer or not _is_dispatcher(viewer):
         await callback.answer("Нет прав", show_alert=True)
         return
-    text, kb = await build_pending_list(session, page)
+    text, kb = await build_pending_list(session, page, language=viewer.language)
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
     await callback.answer()
 
@@ -784,7 +899,9 @@ async def pend_view(callback: CallbackQuery, session: AsyncSession):
     if not viewer or not _is_dispatcher(viewer):
         await callback.answer("Нет прав", show_alert=True)
         return
-    text, kb = await build_pending_detail(session, uid, page)
+    text, kb = await build_pending_detail(
+        session, uid, page, language=viewer.language
+    )
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
     await callback.answer()
 
@@ -950,7 +1067,8 @@ async def ai_triage(callback: CallbackQuery, session: AsyncSession):
         await callback.answer("✨ Анализирую...")
         tri = await llm.triage(req.description, req.category)
         await callback.message.answer(
-            f"✨ <b>ИИ-триаж #{req.id}</b>\nПриоритет: <b>{escape(tri.priority)}</b>\n"
+            f"✨ <b>ИИ-триаж #{req.id}</b>\nПриоритет: "
+            f"<b>{escape(URGENCY_LABELS.get(tri.priority, 'Не определён'))}</b>\n"
             f"Кратко: {escape(tri.summary)}\nПодсказка: {escape(tri.hint)}",
             parse_mode="HTML"
         )

@@ -28,7 +28,9 @@ PAGE_SIZE = 5
 
 def get_main_keyboard(user: User):
     if is_dispatcher(user):
-        return dispatcher_menu(user.language)
+        return dispatcher_menu(
+            user.language, chairman=is_administrator(user)
+        )
     if user.role == "worker":
         return worker_menu(user.is_on_shift, user.language)
     return resident_menu(

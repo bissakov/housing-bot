@@ -6,7 +6,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bot.models import Request, User
-from bot.services.scheduler import check_escalation, escalate_overdue_requests
+from bot.services.scheduler import (
+    check_escalation, dispatch_deferred_requests, escalate_overdue_requests,
+)
 
 
 @pytest.mark.asyncio
@@ -80,3 +82,58 @@ async def test_check_escalation_accepts_injected_session_factory(engine, fake_bo
     async with factory() as session:
         request = (await session.execute(select(Request))).scalar_one()
         assert request.is_escalated is True
+
+
+async def test_pending_approval_is_not_escalated(session, fake_bot):
+    resident = User(telegram_id=903, role="resident", is_approved=True)
+    session.add(resident)
+    await session.flush()
+    session.add(Request(
+        resident_id=resident.id,
+        category="kazakhdomofon",
+        description="Добавление камер",
+        status="new",
+        approval_status="pending",
+        created_at=datetime.now(timezone.utc) - timedelta(hours=2),
+    ))
+    await session.flush()
+
+    with patch(
+        "bot.services.scheduler.notify_workers_force", new=AsyncMock()
+    ) as notify_workers:
+        count = await escalate_overdue_requests(
+            fake_bot, session, escalation_minutes=20
+        )
+
+    assert count == 0
+    notify_workers.assert_not_awaited()
+
+
+async def test_deferred_cleaning_is_dispatched_once(session, fake_bot):
+    resident = User(
+        telegram_id=904, role="resident", is_approved=True,
+        full_name="Житель", apartment="9",
+    )
+    session.add(resident)
+    await session.flush()
+    request = Request(
+        resident_id=resident.id,
+        category="cleaning",
+        description="Грязный пол в первом подъезде",
+        status="new",
+        dispatch_after=datetime.now(timezone.utc) - timedelta(minutes=1),
+    )
+    session.add(request)
+    await session.flush()
+
+    with patch(
+        "bot.services.scheduler.notify_workers", new=AsyncMock()
+    ) as notify_workers:
+        first = await dispatch_deferred_requests(fake_bot, session)
+        second = await dispatch_deferred_requests(fake_bot, session)
+
+    assert first == 1
+    assert second == 0
+    notify_workers.assert_awaited_once()
+    await session.refresh(request)
+    assert request.dispatched_at is not None

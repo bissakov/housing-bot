@@ -6,13 +6,14 @@ from datetime import timedelta
 
 from aiogram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bot.config import ESCALATION_MINUTES
+from bot.constants import CATEGORY_LABELS
 from bot.database import async_session
 from bot.models import Request, User
-from bot.services.notify import notify_dispatchers, notify_workers_force
+from bot.services.notify import notify_dispatchers, notify_workers, notify_workers_force
 from bot.timezone import utc_now
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,14 @@ async def escalate_overdue_requests(
             Request.status == "new",
             Request.created_at <= cutoff,
             Request.is_escalated.is_(False),
+            or_(
+                Request.approval_status.is_(None),
+                Request.approval_status == "approved",
+            ),
+            or_(
+                Request.dispatch_after.is_(None),
+                Request.dispatch_after <= cutoff,
+            ),
         )
     )
     request_ids = list(result.scalars())
@@ -46,6 +55,14 @@ async def escalate_overdue_requests(
                 Request.id == request_id,
                 Request.status == "new",
                 Request.is_escalated.is_(False),
+                or_(
+                    Request.approval_status.is_(None),
+                    Request.approval_status == "approved",
+                ),
+                or_(
+                    Request.dispatch_after.is_(None),
+                    Request.dispatch_after <= cutoff,
+                ),
             )
             .values(is_escalated=True, escalated_at=utc_now())
         )
@@ -63,7 +80,7 @@ async def escalate_overdue_requests(
         address = f"кв. {resident.apartment}" if resident and resident.apartment else "адрес не указан"
         text = (
             f"⚠️ <b>Эскалация заявки #{request.id}</b>\n"
-            f"Категория: {escape(request.category)}\n"
+            f"Категория: {escape(CATEGORY_LABELS.get(request.category, 'Неизвестная категория'))}\n"
             f"Адрес: {escape(address)}\n"
             f"Описание: {escape(request.description[:500])}"
         )
@@ -90,6 +107,71 @@ async def check_escalation(
         return 0
 
 
+async def dispatch_deferred_requests(
+    bot: Bot, session: AsyncSession
+) -> int:
+    """Release cleaning requests at the next configured working window once."""
+    now = utc_now()
+    result = await session.execute(
+        select(Request.id).where(
+            Request.status == "new",
+            Request.dispatch_after.is_not(None),
+            Request.dispatch_after <= now,
+            Request.dispatched_at.is_(None),
+        )
+    )
+    dispatched = 0
+    for request_id in result.scalars():
+        claimed = await session.execute(
+            update(Request)
+            .where(
+                Request.id == request_id,
+                Request.status == "new",
+                Request.dispatch_after <= now,
+                Request.dispatched_at.is_(None),
+            )
+            .values(dispatched_at=now)
+        )
+        if claimed.rowcount != 1:
+            continue
+        request = (
+            await session.execute(select(Request).where(Request.id == request_id))
+        ).scalar_one()
+        resident = (
+            await session.execute(select(User).where(User.id == request.resident_id))
+        ).scalar_one_or_none()
+        await notify_workers(
+            bot,
+            session,
+            request.category,
+            "",
+            urgency=request.urgency,
+            message_key="new_request_notification",
+            message_values={
+                "id": request.id,
+                "category": request.category,
+                "address": escape(resident.apartment if resident else "?"),
+                "resident": escape(resident.full_name if resident else ""),
+                "description": escape(request.description[:500]),
+            },
+        )
+        dispatched += 1
+    return dispatched
+
+
+async def check_deferred_dispatch(
+    bot: Bot,
+    session_factory: async_sessionmaker[AsyncSession] = async_session,
+) -> int:
+    try:
+        async with session_factory() as session:
+            async with session.begin():
+                return await dispatch_deferred_requests(bot, session)
+    except Exception:
+        logger.exception("deferred_dispatch_job_failed")
+        return 0
+
+
 def setup_scheduler(
     bot: Bot,
     session_factory: async_sessionmaker[AsyncSession] = async_session,
@@ -101,6 +183,16 @@ def setup_scheduler(
         minutes=1,
         kwargs={"bot": bot, "session_factory": session_factory},
         id="request-escalation",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        check_deferred_dispatch,
+        "interval",
+        minutes=1,
+        kwargs={"bot": bot, "session_factory": session_factory},
+        id="deferred-request-dispatch",
         replace_existing=True,
         max_instances=1,
         coalesce=True,

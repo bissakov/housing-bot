@@ -1,6 +1,8 @@
 """Centralized role and resource authorization helpers."""
 
 from bot.models import Request, User
+from bot.services.request_routing import is_worker_ready
+from bot.timezone import utc_now
 
 
 def is_administrator(user: User | None) -> bool:
@@ -40,6 +42,7 @@ def can_view_available_request(user: User | None, request: Request) -> bool:
         and user.is_on_shift
         and request.status == "new"
         and request.category == user.worker_category
+        and is_worker_ready(request, utc_now())
     )
 
 

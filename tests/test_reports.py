@@ -1,7 +1,7 @@
 from datetime import date
 
 from bot.callbacks import ReportCallback
-from bot.services.reports import ReportFilters, _csv_safe, export_csv, report_keyboard, report_period
+from bot.services.reports import ReportFilters, _csv_safe, build_overview, export_csv, report_keyboard, report_period
 
 
 def test_report_callbacks_fit_telegram_limit_with_all_filters():
@@ -44,6 +44,16 @@ def test_csv_values_cannot_become_spreadsheet_formulas():
     assert _csv_safe("normal text") == "normal text"
 
 
+async def test_overview_uses_completion_wording(session):
+    text, _ = await build_overview(
+        session,
+        ReportFilters(period="custom", custom_start=date(2000, 1, 1), custom_end=date(2000, 1, 2)),
+    )
+
+    assert "Завершено" in text
+    assert "Закрыто" not in text
+
+
 async def test_empty_csv_export_has_headers(session):
     document = await export_csv(
         session,
@@ -51,4 +61,5 @@ async def test_empty_csv_export_has_headers(session):
     )
 
     assert document.data.startswith(b"\xef\xbb\xbf")
-    assert b"created_at" in document.data
+    assert "Создана".encode() in document.data
+    assert document.filename.startswith("заявки_")

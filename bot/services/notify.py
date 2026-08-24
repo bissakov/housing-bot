@@ -137,6 +137,27 @@ async def notify_dispatchers(
     return DeliveryReport(delivered, failed)
 
 
+async def notify_administrators(
+    bot: Bot, session: AsyncSession, text: str, **kwargs
+) -> DeliveryReport:
+    """Notify internal administrators, presented to users as chairmen."""
+    result = await session.execute(
+        select(User).where(
+            User.role == "administrator", User.is_approved.is_(True)
+        )
+    )
+    recipients = {user.telegram_id for user in result.scalars().all()}
+    recipients.update(ADMIN_IDS)
+    recipients = {tid for tid in recipients if tid < SEED_TG_START}
+    delivered = failed = 0
+    for telegram_id in recipients:
+        if await _send(bot, telegram_id, text, **kwargs):
+            delivered += 1
+        else:
+            failed += 1
+    return DeliveryReport(delivered, failed)
+
+
 async def notify_resident(
     bot: Bot,
     resident_telegram_id: int,

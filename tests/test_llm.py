@@ -433,6 +433,8 @@ async def test_llm_outage_falls_back_to_manual(monkeypatch, engine, session):
 
     cb = make_callback("req_category:plumber", tg_id=11111)
     await res_mod.choose_category(cb, state, session, bot)
+    area_cb = make_callback("req_area:common", tg_id=11111)
+    await res_mod.choose_service_area(area_cb, state, session, bot)
     await session.commit()
 
     req = (await _requests_of(session, u))[0]

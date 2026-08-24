@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from bot.callbacks import ReportCallback
-from bot.constants import CATEGORY_LABELS, STATUS_LABELS
+from bot.constants import CATEGORY_LABELS, STATUS_LABELS, URGENCY_LABELS
 from bot.models import Request, RequestEvent, User
 from bot.config import DISPLAY_TIMEZONE
 from bot.timezone import format_local, local_now
@@ -48,7 +48,10 @@ PERIOD_LABELS = {
 URGENCY_LABELS = {"high": "высокий", "normal": "обычный", "low": "низкий", "none": "не определён"}
 RESULT_LABELS = {"done": "выполнено", "not_done": "не выполнено", "none": "без результата"}
 PERIOD_CODES = {"today": "t", "yesterday": "y", "7d": "7", "30d": "30", "month": "m", "prev_month": "pm", "custom": "c"}
-CATEGORY_CODES = {"all": "a", "electrician": "e", "plumber": "p", "security": "s"}
+CATEGORY_CODES = {
+    "all": "a", "electrician": "e", "plumber": "p", "security": "s",
+    "cleaning": "c", "kazakhdomofon": "k",
+}
 URGENCY_CODES = {"all": "a", "high": "h", "normal": "n", "low": "l", "none": "x"}
 RESULT_CODES = {"all": "a", "done": "d", "not_done": "n", "none": "x"}
 ESCALATION_CODES = {"all": "a", "yes": "y", "no": "n"}
@@ -232,8 +235,8 @@ async def build_overview(session: AsyncSession, filters: ReportFilters) -> tuple
         "",
         "<b>ПОТОК ЗАЯВОК</b>",
         f"🆕 Поступило: <b>{len(created)}</b>",
-        f"✅ Закрыто: <b>{len(closed)}</b>",
-        f"➕ Поступило − закрыто: <b>{len(created) - len(closed):+d}</b>",
+        f"✅ Завершено: <b>{len(closed)}</b>",
+        f"➕ Поступило − завершено: <b>{len(created) - len(closed):+d}</b>",
         f"🚨 Эскалировано: <b>{len(escalated)}</b>",
         "",
         "<b>СКОРОСТЬ</b>",
@@ -308,7 +311,7 @@ async def build_breakdown(session: AsyncSession, filters: ReportFilters, kind: s
     for label, items in sorted(groups.items()):
         lines.append(
             f"<b>{label}</b>: поступило {len(items)} · "
-            f"из них сейчас закрыто {sum(r.status == 'closed' for r in items)}"
+            f"из них завершено {sum(r.status == 'closed' for r in items)}"
         )
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ К отчёту", callback_data=_cb("o", filters))]])
     return "\n".join(lines), kb
@@ -331,7 +334,7 @@ async def build_dynamics(session: AsyncSession, filters: ReportFilters) -> tuple
         local = closed.astimezone(LOCAL_TIMEZONE)
         key = local.strftime("%d.%m" if bucket == "day" else "%m.%Y")
         counts.setdefault(key, [0, 0])[1] += 1
-    lines = ["📈 <b>Динамика</b>", date_label, "", "Дата        Поступило · Закрыто"]
+    lines = ["📈 <b>Динамика</b>", date_label, "", "Дата        Поступило · Завершено"]
     for key, values in counts.items():
         lines.append(f"<code>{key:10} {values[0]:5} · {values[1]:5}</code>")
     if not counts:
@@ -352,17 +355,27 @@ async def export_csv(session: AsyncSession, filters: ReportFilters) -> BufferedI
     requests = list((await session.execute(stmt.order_by(Request.created_at.desc()))).scalars().unique())
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["id", "created_at", "accepted_at", "closed_at", "category", "urgency", "status", "escalated", "apartment", "resident", "worker", "result", "description", "completion_comment"])
+    writer.writerow([
+        "Номер", "Создана", "Принята", "Завершена", "Категория",
+        "Приоритет", "Статус", "Эскалирована", "Квартира", "Житель",
+        "Исполнитель", "Результат", "Описание", "Комментарий исполнителя",
+    ])
     for req in requests:
         writer.writerow([
             req.id,
             format_local(req.created_at, "%Y-%m-%d %H:%M"),
             format_local(req.accepted_at, "%Y-%m-%d %H:%M"),
             format_local(req.closed_at, "%Y-%m-%d %H:%M"),
-            req.category, req.urgency, STATUS_LABELS.get(req.status, req.status), req.is_escalated,
+            CATEGORY_LABELS.get(req.category, "Неизвестная категория"),
+            URGENCY_LABELS.get(req.urgency, "Не определён"),
+            STATUS_LABELS.get(req.status, "Неизвестный статус"),
+            "Да" if req.is_escalated else "Нет",
             _csv_safe(req.resident.apartment), _csv_safe(req.resident.full_name),
-            _csv_safe(req.worker.full_name if req.worker else ""), req.completion_result,
+            _csv_safe(req.worker.full_name if req.worker else ""),
+            {"done": "Выполнено", "not_done": "Не выполнено"}.get(
+                req.completion_result, "Без результата"
+            ),
             _csv_safe(req.description), _csv_safe(req.completion_comment),
         ])
-    filename = f"requests_{start.astimezone(LOCAL_TIMEZONE):%Y-%m-%d}_{(end - timedelta(days=1)).astimezone(LOCAL_TIMEZONE):%Y-%m-%d}.csv"
+    filename = f"заявки_{start.astimezone(LOCAL_TIMEZONE):%Y-%m-%d}_{(end - timedelta(days=1)).astimezone(LOCAL_TIMEZONE):%Y-%m-%d}.csv"
     return BufferedInputFile(output.getvalue().encode("utf-8-sig"), filename=filename)

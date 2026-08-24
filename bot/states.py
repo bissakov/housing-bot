@@ -12,6 +12,8 @@ class RegistrationStates(StatesGroup):
 
 class RequestStates(StatesGroup):
     waiting_category = State()
+    waiting_service_area = State()
+    waiting_media = State()
     waiting_description = State()
     waiting_confirm = State()
     waiting_duplicate_clarification = State()
@@ -24,6 +26,10 @@ class WorkerCompletionStates(StatesGroup):
 
 class AnnouncementStates(StatesGroup):
     waiting_text = State()
+
+
+class RequestApprovalStates(StatesGroup):
+    waiting_rejection_comment = State()
 
 
 class AddWorkerStates(StatesGroup):

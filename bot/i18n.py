@@ -37,7 +37,7 @@ TEXTS = {
     "subrole_owner": {"kk": "🏠 Меншік иесі", "ru": "🏠 Собственник"},
     "subrole_tenant": {"kk": "🔑 Жалға алушы", "ru": "🔑 Арендатор"},
     "role_dispatcher": {"kk": "Диспетчер", "ru": "Диспетчер"},
-    "role_administrator": {"kk": "Әкімші", "ru": "Администратор"},
+    "role_administrator": {"kk": "Төраға", "ru": "Председатель"},
     "pending_approval": {"kk": "растауды күтуде", "ru": "ожидают подтверждения"},
     "main_menu": {"kk": "Басты мәзір", "ru": "Главное меню"},
     "cancel": {"kk": "❌ Болдырмау", "ru": "❌ Отмена"},
@@ -53,6 +53,7 @@ TEXTS = {
     "pending_workers": {"kk": "⏳ Растауға", "ru": "⏳ На подтверждение"},
     "add_worker": {"kk": "➕ Орындаушы қосу", "ru": "➕ Добавить исполнителя"},
     "announcements_button": {"kk": "📢 Хабарландырулар", "ru": "📢 Объявления"},
+    "participants": {"kk": "👥 Қатысушылар", "ru": "👥 Участники"},
     "manage_tenant": {"kk": "🔑 Жалға алушы", "ru": "🔑 Арендатор"},
     "resident_placeholder": {"kk": "Әрекетті таңдаңыз", "ru": "Выберите действие"},
     "worker_placeholder": {"kk": "Орындаушы мәзірі", "ru": "Меню исполнителя"},
@@ -148,12 +149,20 @@ TEXTS = {
 }
 
 CATEGORY_LABELS = {
-    "kk": {"electrician": "⚡ Электрик", "plumber": "🔧 Сантехник", "security": "🛡️ Күзет"},
-    "ru": {"electrician": "⚡ Электрик", "plumber": "🔧 Сантехник", "security": "🛡️ Охрана"},
+    "kk": {
+        "electrician": "⚡ Электрик", "plumber": "🔧 Сантехник",
+        "security": "🛡️ Күзет", "cleaning": "🧹 Клининг",
+        "kazakhdomofon": "📹 Қазақдомофон",
+    },
+    "ru": {
+        "electrician": "⚡ Электрик", "plumber": "🔧 Сантехник",
+        "security": "🛡️ Охрана", "cleaning": "🧹 Клининг",
+        "kazakhdomofon": "📹 Казахдомофон",
+    },
 }
 STATUS_LABELS = {
-    "kk": {"new": "🆕 Жаңа", "accepted": "🔧 Орындалуда", "closed": "✅ Жабық"},
-    "ru": {"new": "🆕 Новая", "accepted": "🔧 В работе", "closed": "✅ Закрыта"},
+    "kk": {"new": "🆕 Жаңа", "accepted": "🔧 Орындалуда", "closed": "✅ Аяқталды"},
+    "ru": {"new": "🆕 Новая", "accepted": "🔧 В работе", "closed": "✅ Завершена"},
 }
 URGENCY_LABELS = {
     "kk": {"low": "Төмен", "normal": "Қалыпты", "high": "Жоғары"},
@@ -226,3 +235,11 @@ def status_label(status: str | None, language: str | None) -> str:
 
 def urgency_label(urgency: str | None, language: str | None) -> str:
     return URGENCY_LABELS[normalize_language(language)].get(urgency, urgency or "")
+
+
+def role_label(role: str | None, language: str | None) -> str:
+    """Return a public role name without exposing an internal role code."""
+    key = f"role_{role}" if role else ""
+    if key in TEXTS:
+        return t(key, language)
+    return "Белгісіз рөл" if normalize_language(language) == "kk" else "Неизвестная роль"

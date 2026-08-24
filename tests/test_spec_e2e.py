@@ -209,7 +209,12 @@ async def test_common_registration_flow(session):
 
 @pytest.mark.asyncio
 async def test_resident_create_request_fsm(session, fake_bot):
-    from bot.handlers.resident import start_request, choose_category, input_description
+    from bot.handlers.resident import (
+        choose_category,
+        choose_service_area,
+        input_description,
+        start_request,
+    )
 
     resident = await create_user(session, telegram_id=501, role="resident", is_approved=True)
     await session.commit()
@@ -228,6 +233,12 @@ async def test_resident_create_request_fsm(session, fake_bot):
     await choose_category(cb, state, session, fake_bot)
     data = await state.get_data()
     assert data["category"] == "plumber"
+
+    area_cb = make_callback("req_area:common", tg_id=501)
+    area_cb.message.edit_text = AsyncMock()
+    await choose_service_area(area_cb, state, session, fake_bot)
+    data = await state.get_data()
+    assert data["service_area"] == "common"
 
     # 3) send description (short should be rejected, then long accepted)
     short = make_message("течет", tg_id=501)

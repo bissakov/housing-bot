@@ -198,3 +198,12 @@ APScheduler every 1 min checks `status='new'` older than 20 min -> notify dispat
 - Worker queues are dynamically sorted by `high`, `normal`, then `low`, with
   escalated and older requests first within a priority. Completing a higher
   priority task therefore promotes the next task without another LLM call.
+
+## Request translations
+
+- Request descriptions are translated into each viewer's selected language.
+  The AI translation and the original are displayed together so staff can
+  verify ambiguous wording.
+- Each `(request, target language)` translation is stored in the database and
+  reused for later viewers. An unavailable LLM is fail-open: the original is
+  still shown and translation can be retried on a later view.

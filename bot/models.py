@@ -211,6 +211,40 @@ class Request(Base):
     attachments: Mapped[list["RequestAttachment"]] = relationship(
         "RequestAttachment", back_populates="request", cascade="all, delete-orphan"
     )
+    translations: Mapped[list["RequestTranslation"]] = relationship(
+        "RequestTranslation", back_populates="request", cascade="all, delete-orphan"
+    )
+
+
+class RequestTranslation(Base):
+    """One persistent LLM translation of a request into a target language."""
+
+    __tablename__ = "request_translations"
+    __table_args__ = (
+        CheckConstraint(
+            "target_language IN ('kk', 'ru')",
+            name="ck_request_translations_language",
+        ),
+        UniqueConstraint(
+            "request_id", "target_language",
+            name="uq_request_translations_request_language",
+        ),
+        Index("ix_request_translations_request", "request_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    request_id: Mapped[int] = mapped_column(
+        ForeignKey("requests.id", ondelete="CASCADE"), nullable=False
+    )
+    target_language: Mapped[str] = mapped_column(String(2), nullable=False)
+    translated_text: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    request: Mapped["Request"] = relationship(
+        "Request", back_populates="translations"
+    )
 
 
 class RequestAttachment(Base):

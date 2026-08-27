@@ -18,6 +18,7 @@ from bot.callbacks import ReportCallback
 from bot.constants import CATEGORY_LABELS, STATUS_LABELS, URGENCY_LABELS
 from bot.models import Request, RequestEvent, User
 from bot.config import DISPLAY_TIMEZONE
+from bot.services.request_translations import localize_request_descriptions
 from bot.timezone import format_local, local_now
 
 
@@ -348,19 +349,28 @@ def _csv_safe(value: object) -> str:
     return "'" + text if text.startswith(("=", "+", "-", "@")) else text
 
 
-async def export_csv(session: AsyncSession, filters: ReportFilters) -> BufferedInputFile:
+async def export_csv(
+    session: AsyncSession,
+    filters: ReportFilters,
+    language: str | None = "ru",
+) -> BufferedInputFile:
     start, end, _ = report_period(filters)
     stmt = select(Request).options(selectinload(Request.worker), selectinload(Request.resident))
     stmt = _filtered(stmt, filters).where(Request.created_at >= start, Request.created_at < end)
     requests = list((await session.execute(stmt.order_by(Request.created_at.desc()))).scalars().unique())
+    localized_descriptions = await localize_request_descriptions(
+        session, requests, language, commit_immediately=True
+    )
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow([
         "Номер", "Создана", "Принята", "Завершена", "Категория",
         "Приоритет", "Статус", "Эскалирована", "Квартира", "Житель",
-        "Исполнитель", "Результат", "Описание", "Комментарий исполнителя",
+        "Исполнитель", "Результат", "Оригинал", "Перевод ИИ",
+        "Комментарий исполнителя",
     ])
     for req in requests:
+        description = localized_descriptions[req.id]
         writer.writerow([
             req.id,
             format_local(req.created_at, "%Y-%m-%d %H:%M"),
@@ -375,7 +385,10 @@ async def export_csv(session: AsyncSession, filters: ReportFilters) -> BufferedI
             {"done": "Выполнено", "not_done": "Не выполнено"}.get(
                 req.completion_result, "Без результата"
             ),
-            _csv_safe(req.description), _csv_safe(req.completion_comment),
+            _csv_safe(description.original),
+            _csv_safe(description.translation),
+            _csv_safe(req.completion_comment),
         ])
+    await session.commit()
     filename = f"заявки_{start.astimezone(LOCAL_TIMEZONE):%Y-%m-%d}_{(end - timedelta(days=1)).astimezone(LOCAL_TIMEZONE):%Y-%m-%d}.csv"
     return BufferedInputFile(output.getvalue().encode("utf-8-sig"), filename=filename)

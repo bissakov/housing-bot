@@ -30,6 +30,11 @@ from bot.states import WorkerCompletionStates
 from bot.timezone import format_local, utc_now
 from bot.services.schedules import get_schedule_status
 from bot.services.request_routing import worker_ready_expression
+from bot.services.request_translations import (
+    format_description_html,
+    localize_request_description,
+    localize_request_descriptions,
+)
 from bot.i18n import t, text_variants
 
 router = Router()
@@ -132,17 +137,21 @@ async def build_worker_available(session: AsyncSession, user: User, page: int) -
     reqs = q.scalars().all()
     if not reqs:
         return "🎉 <b>Новых заявок нет</b>\n\nВ вашей категории сейчас всё спокойно.", InlineKeyboardMarkup(inline_keyboard=[])
+    localized_descriptions = await localize_request_descriptions(
+        session, reqs, user.language, commit_immediately=True
+    )
     category_label = CATEGORY_LABELS.get(user.worker_category, user.worker_category)
     lines = [f"📋 <b>Доступные заявки</b> — {page+1}/{total_pages} • всего {total}\n{category_label}\n"]
     for req in reqs:
         resident = req.resident
         addr = f"кв. {resident.apartment}" if resident and resident.apartment else ""
-        desc = escape(req.description.strip().replace("\n", " "))
-        if len(desc) > 55:
-            desc = desc[:55] + "…"
+        description = localized_descriptions[req.id]
+        desc = format_description_html(
+            description, user.language, compact=True, limit=55
+        )
         date = format_local(req.created_at, "%d.%m %H:%M", "")
         priority = URGENCY_LABELS.get(req.urgency, "Обычный")
-        lines.append(f"<b>#{req.id}</b> • {priority} • {escape(addr)} {escape(resident.full_name if resident else '')} • {date}\n<i>{desc}</i>\n")
+        lines.append(f"<b>#{req.id}</b> • {priority} • {escape(addr)} {escape(resident.full_name if resident else '')} • {date}\n{desc}\n")
     text = "\n".join(lines)
     kb_rows: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
@@ -161,6 +170,7 @@ async def build_worker_available(session: AsyncSession, user: User, page: int) -
         if page < total_pages - 1:
             pag.append(InlineKeyboardButton(text="▶️", callback_data=f"w_av_list:{page+1}"))
         kb_rows.append(pag)
+    await session.commit()
     return text, InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
 async def build_worker_mine(session: AsyncSession, user: User, page: int) -> tuple[str, InlineKeyboardMarkup]:
@@ -177,13 +187,17 @@ async def build_worker_mine(session: AsyncSession, user: User, page: int) -> tup
     reqs = q.scalars().all()
     if not reqs:
         return "✅ <b>У вас нет заявок в работе</b>\n\nМожно принять новую в разделе «📋 Доступные заявки».", InlineKeyboardMarkup(inline_keyboard=[])
+    localized_descriptions = await localize_request_descriptions(
+        session, reqs, user.language, commit_immediately=True
+    )
     lines = [f"🔧 <b>Мои заявки</b> — {page+1}/{total_pages} • всего {total}\n"]
     for req in reqs:
         resident = req.resident
         addr = f"кв. {resident.apartment}" if resident and resident.apartment else ""
-        desc = escape(req.description.strip().replace("\n", " "))
-        if len(desc) > 55:
-            desc = desc[:55] + "…"
+        description = localized_descriptions[req.id]
+        desc = format_description_html(
+            description, user.language, compact=True, limit=55
+        )
         lines.append(f"<b>#{req.id}</b> {CATEGORY_LABELS.get(req.category, req.category)} {addr} • {desc}\n")
     text = "\n".join(lines)
     kb_rows: list[list[InlineKeyboardButton]] = []
@@ -203,6 +217,7 @@ async def build_worker_mine(session: AsyncSession, user: User, page: int) -> tup
         if page < total_pages - 1:
             pag.append(InlineKeyboardButton(text="▶️", callback_data=f"w_my_list:{page+1}"))
         kb_rows.append(pag)
+    await session.commit()
     return text, InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
 
@@ -294,12 +309,23 @@ async def w_av_view(
     rres = await session.execute(select(User).where(User.id == req.resident_id))
     resident = rres.scalar_one_or_none()
     addr = f"кв. {resident.apartment}" if resident and resident.apartment else ""
+    viewer = await get_actor(session, callback.from_user.id)
+    description = await localize_request_description(
+        session,
+        req,
+        viewer.language if viewer else None,
+        commit_immediately=True,
+    )
+    description_html = format_description_html(
+        description, viewer.language if viewer else None
+    )
+    await session.commit()
     text = (
         f"🧾 <b>Заявка #{req.id}</b>\n"
         f"{CATEGORY_LABELS.get(req.category, req.category)} • {URGENCY_LABELS.get(req.urgency, req.urgency)} приоритет\n\n"
         f"📍 <b>Адрес:</b> {escape(addr)}\n"
         f"👤 <b>Житель:</b> {escape(resident.full_name if resident else '—')}\n\n"
-        f"📝 <b>Описание</b>\n{escape(req.description)}\n\n"
+        f"{description_html}\n\n"
         f"{'📍 <b>Место:</b> внутри квартиры' + chr(10) if req.service_area == 'apartment' else ''}"
         f"{'📍 <b>Место:</b> МОП / общее имущество' + chr(10) if req.service_area == 'common' else ''}"
         f"{'📎 <b>Вложений:</b> ' + str(len(req.attachments)) + chr(10) if req.attachments else ''}"
@@ -345,13 +371,24 @@ async def w_my_view(
     rres = await session.execute(select(User).where(User.id == req.resident_id))
     resident = rres.scalar_one_or_none()
     addr = f"кв. {resident.apartment}" if resident and resident.apartment else ""
+    viewer = await get_actor(session, callback.from_user.id)
+    description = await localize_request_description(
+        session,
+        req,
+        viewer.language if viewer else None,
+        commit_immediately=True,
+    )
+    description_html = format_description_html(
+        description, viewer.language if viewer else None
+    )
+    await session.commit()
     text = (
         f"🧾 <b>Заявка #{req.id}</b>\n"
         f"{STATUS_LABELS['accepted']} • {CATEGORY_LABELS.get(req.category, req.category)}\n"
         f"{URGENCY_LABELS.get(req.urgency, req.urgency)} приоритет\n\n"
         f"📍 <b>Адрес:</b> {escape(addr)}\n"
         f"👤 <b>Житель:</b> {escape(resident.full_name if resident else '—')}\n\n"
-        f"📝 <b>Описание</b>\n{escape(req.description)}"
+        f"{description_html}"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [

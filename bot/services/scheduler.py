@@ -10,7 +10,6 @@ from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bot.config import ESCALATION_MINUTES
-from bot.constants import CATEGORY_LABELS
 from bot.database import async_session
 from bot.models import Request, User
 from bot.services.notify import notify_dispatchers, notify_workers, notify_workers_force
@@ -78,14 +77,34 @@ async def escalate_overdue_requests(
         )
         resident = resident_result.scalar_one_or_none()
         address = f"кв. {resident.apartment}" if resident and resident.apartment else "адрес не указан"
-        text = (
-            f"⚠️ <b>Эскалация заявки #{request.id}</b>\n"
-            f"Категория: {escape(CATEGORY_LABELS.get(request.category, 'Неизвестная категория'))}\n"
+        values = {
+            "id": request.id,
+            "category": request.category,
+            "address": escape(address),
+        }
+        fallback_text = (
+            f"⚠️ Эскалация заявки #{request.id}\n"
             f"Адрес: {escape(address)}\n"
-            f"Описание: {escape(request.description[:500])}"
+            f"Оригинал: {escape(request.description[:500])}"
         )
-        await notify_workers_force(bot, session, request.category, text)
-        await notify_dispatchers(bot, session, text)
+        await notify_workers_force(
+            bot,
+            session,
+            request.category,
+            fallback_text,
+            message_key="request_escalation",
+            message_values=values,
+            request=request,
+        )
+        await notify_dispatchers(
+            bot,
+            session,
+            fallback_text,
+            message_key="request_escalation",
+            message_values=values,
+            request=request,
+            parse_mode="HTML",
+        )
         escalated += 1
 
     return escalated
@@ -152,8 +171,8 @@ async def dispatch_deferred_requests(
                 "category": request.category,
                 "address": escape(resident.apartment if resident else "?"),
                 "resident": escape(resident.full_name if resident else ""),
-                "description": escape(request.description[:500]),
             },
+            request=request,
         )
         dispatched += 1
     return dispatched

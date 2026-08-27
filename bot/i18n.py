@@ -120,8 +120,8 @@ TEXTS = {
         "ru": "👤 <b>Регистрация #{id}</b> • {role} • {created}\n{name} • кв. {apartment}\n",
     },
     "pending_request_item": {
-        "kk": "📹 <b>#{id} өтінімді келісу</b> • {created}\n{resident} • {apartment}-пәтер\n<i>{description}</i>\n",
-        "ru": "📹 <b>Согласование заявки #{id}</b> • {created}\n{resident} • кв. {apartment}\n<i>{description}</i>\n",
+        "kk": "📹 <b>#{id} өтінімді келісу</b> • {created}\n{resident} • {apartment}-пәтер\n{description}\n",
+        "ru": "📹 <b>Согласование заявки #{id}</b> • {created}\n{resident} • кв. {apartment}\n{description}\n",
     },
     "add_worker": {"kk": "➕ Орындаушы қосу", "ru": "➕ Добавить исполнителя"},
     "announcements_button": {"kk": "📢 Хабарландырулар", "ru": "📢 Объявления"},
@@ -134,8 +134,20 @@ TEXTS = {
     "registration_worker": {"kk": "🔧 Мен орындаушымын", "ru": "🔧 Я исполнитель"},
     "announcement_broadcast": {"kk": "📢 <b>Хабарландыру</b>\n\n{text}", "ru": "📢 <b>Объявление</b>\n\n{text}"},
     "new_request_notification": {
-        "kk": "🆕 <b>Жаңа өтінім #{id}</b>\nСанат: {category}\nМекенжай: {address} | {resident}\nСипаттама: {description}\n\nҚабылдау үшін «{available_requests}» басыңыз.",
-        "ru": "🆕 <b>Новая заявка #{id}</b>\nКатегория: {category}\nАдрес: {address} | {resident}\nОписание: {description}\n\nНажмите «{available_requests}» чтобы принять.",
+        "kk": "🆕 <b>Жаңа өтінім #{id}</b>\nСанат: {category}\nМекенжай: {address} | {resident}\n\n{description}\n\nҚабылдау үшін «{available_requests}» басыңыз.",
+        "ru": "🆕 <b>Новая заявка #{id}</b>\nКатегория: {category}\nАдрес: {address} | {resident}\n\n{description}\n\nНажмите «{available_requests}» чтобы принять.",
+    },
+    "new_kazakhdomofon_request_admin": {
+        "kk": "📹 Қазақдомофонның #{id} өтінімі келісуді күтуде.\nТұрғын: {resident}, {apartment}-пәтер\n\n{description}",
+        "ru": "📹 Заявка Казахдомофон #{id} ожидает согласования.\nЖитель: {resident}, кв. {apartment}\n\n{description}",
+    },
+    "new_cleaning_request_admin": {
+        "kk": "🧹 Клинингтің жаңа #{id} өтінімі (қарау).\n{apartment}-пәтер\n\n{description}",
+        "ru": "🧹 Новая заявка клининга #{id} (просмотр).\nКв. {apartment}\n\n{description}",
+    },
+    "request_escalation": {
+        "kk": "⚠️ <b>#{id} өтінімі бойынша эскалация</b>\nСанат: {category}\nМекенжай: {address}\n\n{description}",
+        "ru": "⚠️ <b>Эскалация заявки #{id}</b>\nКатегория: {category}\nАдрес: {address}\n\n{description}",
     },
     "no_available_workers": {
         "kk": "⚠️ Жаңа #{id} өтініміне ауысымдағы қолжетімді орындаушылар жоқ.",
@@ -152,6 +164,8 @@ TEXTS = {
     "tenant_registration_done": {"kk": "Рақмет, {name}! Деректер қабылданды ({apartment}-пәтер).\nМеншік иесінің растауын күтіңіз — сізге хабарлама келеді.", "ru": "Спасибо, {name}! Данные приняты (кв. {apartment}).\nОжидайте подтверждения собственника — вам придёт уведомление."},
     "finish_registration": {"kk": "Алдымен /start арқылы тіркелуді аяқтаңыз", "ru": "Сначала завершите регистрацию через /start"},
     "new_request": {"kk": "Жаңа өтінім", "ru": "Новая заявка"},
+    "original_description": {"kk": "Түпнұсқа", "ru": "Оригинал"},
+    "ai_translation": {"kk": "ЖИ аудармасы", "ru": "Перевод ИИ"},
     "choose_request_category": {"kk": "1/2 қадам — санатты таңдаңыз:", "ru": "Шаг 1 из 2 — выберите категорию:"},
     "describe_problem": {"kk": "2/2 қадам — мәселені сипаттаңыз", "ru": "Шаг 2 из 2 — опишите проблему"},
     "category": {"kk": "Санат", "ru": "Категория"},

@@ -12,8 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bot.config import ADMIN_IDS
 from bot.constants import SEED_TG_START
 from bot.i18n import category_label, render, t
-from bot.models import User
+from bot.models import Request, User
 from bot.services.identity import delivery_telegram_id
+from bot.services.request_translations import (
+    format_description_html,
+    localize_request_description,
+)
 from bot.services.schedules import is_worker_available
 
 logger = logging.getLogger(__name__)
@@ -73,6 +77,8 @@ async def notify_workers(
     urgency: str | None = None,
     message_key: str | None = None,
     message_values: dict | None = None,
+    request: Request | None = None,
+    commit_translations: bool = False,
 ) -> DeliveryReport:
     query = select(User).where(
         User.role == "worker",
@@ -102,6 +108,16 @@ async def notify_workers(
         localized_text = text
         if message_key:
             values = dict(message_values or {})
+            if request is not None:
+                description = await localize_request_description(
+                    session,
+                    request,
+                    worker.language,
+                    commit_immediately=commit_translations,
+                )
+                values["description"] = format_description_html(
+                    description, worker.language
+                )
             if "category" in values:
                 values["category"] = category_label(values["category"], worker.language)
             values.setdefault("available_requests", t("available_requests", worker.language))
@@ -118,9 +134,11 @@ async def notify_workers(
 
 
 async def notify_workers_force(
-    bot: Bot, session: AsyncSession, category: str, text: str
+    bot: Bot, session: AsyncSession, category: str, text: str, **kwargs
 ) -> DeliveryReport:
-    return await notify_workers(bot, session, category, text, force_all=True)
+    return await notify_workers(
+        bot, session, category, text, force_all=True, **kwargs
+    )
 
 
 async def notify_dispatchers(
@@ -130,6 +148,8 @@ async def notify_dispatchers(
     *,
     message_key: str | None = None,
     message_values: dict | None = None,
+    request: Request | None = None,
+    commit_translations: bool = False,
     **kwargs,
 ) -> DeliveryReport:
     result = await session.execute(
@@ -147,7 +167,20 @@ async def notify_dispatchers(
 
     delivered = failed = 0
     for telegram_id, language in recipients.items():
-        localized_text = render(message_key, language, message_values) if message_key else text
+        values = dict(message_values or {})
+        if "category" in values:
+            values["category"] = category_label(values["category"], language)
+        if request is not None:
+            description = await localize_request_description(
+                session,
+                request,
+                language,
+                commit_immediately=commit_translations,
+            )
+            values["description"] = format_description_html(
+                description, language
+            )
+        localized_text = render(message_key, language, values) if message_key else text
         if await _send(bot, telegram_id, localized_text, **kwargs):
             delivered += 1
         else:
@@ -156,7 +189,15 @@ async def notify_dispatchers(
 
 
 async def notify_administrators(
-    bot: Bot, session: AsyncSession, text: str, **kwargs
+    bot: Bot,
+    session: AsyncSession,
+    text: str,
+    *,
+    message_key: str | None = None,
+    message_values: dict | None = None,
+    request: Request | None = None,
+    commit_translations: bool = False,
+    **kwargs,
 ) -> DeliveryReport:
     """Notify internal administrators, presented to users as chairmen."""
     result = await session.execute(
@@ -165,7 +206,7 @@ async def notify_administrators(
         )
     )
     recipients = {
-        telegram_id
+        telegram_id: user.language
         for user in result.scalars().all()
         if (
             telegram_id := await delivery_telegram_id(
@@ -173,11 +214,28 @@ async def notify_administrators(
             )
         ) is not None
     }
-    recipients.update(ADMIN_IDS)
-    recipients = {tid for tid in recipients if tid < SEED_TG_START}
+    recipients.update({tid: None for tid in ADMIN_IDS if tid not in recipients})
+    recipients = {
+        tid: language for tid, language in recipients.items()
+        if tid < SEED_TG_START
+    }
     delivered = failed = 0
-    for telegram_id in recipients:
-        if await _send(bot, telegram_id, text, **kwargs):
+    for telegram_id, language in recipients.items():
+        values = dict(message_values or {})
+        if "category" in values:
+            values["category"] = category_label(values["category"], language)
+        if request is not None:
+            description = await localize_request_description(
+                session,
+                request,
+                language,
+                commit_immediately=commit_translations,
+            )
+            values["description"] = format_description_html(
+                description, language
+            )
+        localized_text = render(message_key, language, values) if message_key else text
+        if await _send(bot, telegram_id, localized_text, **kwargs):
             delivered += 1
         else:
             failed += 1

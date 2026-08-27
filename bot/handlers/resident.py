@@ -28,6 +28,11 @@ from bot.constants import KAZAKHDOMOFON_TEMPLATES, URGENCY_LABELS
 from bot.i18n import category_label, t, text_variants
 from bot.timezone import format_local, utc_now
 from bot.services.request_routing import next_cleaning_dispatch
+from bot.services.request_translations import (
+    format_description_html,
+    localize_request_description,
+    localize_request_descriptions,
+)
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -246,6 +251,9 @@ async def build_resident_list(session: AsyncSession, resident_db_id: int, page: 
         .offset(page * PAGE_SIZE)
     )
     reqs = q.scalars().all()
+    viewer = (
+        await session.execute(select(User).where(User.id == resident_db_id))
+    ).scalar_one_or_none()
 
     if not reqs:
         return (
@@ -253,16 +261,27 @@ async def build_resident_list(session: AsyncSession, resident_db_id: int, page: 
             InlineKeyboardMarkup(inline_keyboard=[]),
         )
 
+    localized_descriptions = await localize_request_descriptions(
+        session,
+        reqs,
+        viewer.language if viewer else None,
+        commit_immediately=True,
+    )
+
     lines = [f"📋 <b>Мои заявки</b> — {page+1}/{total_pages} • всего {total}\n"]
     for req in reqs:
         w_str = ""
         if req.worker:
             w_str = f" → {escape(req.worker.full_name or str(req.worker.telegram_id))}"
-        desc = escape(req.description.strip().replace("\n", " "))
-        if len(desc) > 60:
-            desc = desc[:60] + "…"
+        description = localized_descriptions[req.id]
+        desc = format_description_html(
+            description,
+            viewer.language if viewer else None,
+            compact=True,
+            limit=60,
+        )
         date = format_local(req.created_at, "%d.%m %H:%M", "")
-        lines.append(f"<b>#{req.id}</b> {CATEGORY_LABELS.get(req.category, req.category)} {STATUS_LABELS.get(req.status, req.status)}{w_str} • {date}\n<i>{desc}</i>\n")
+        lines.append(f"<b>#{req.id}</b> {CATEGORY_LABELS.get(req.category, req.category)} {STATUS_LABELS.get(req.status, req.status)}{w_str} • {date}\n{desc}\n")
 
     text = "\n".join(lines)
 
@@ -286,6 +305,7 @@ async def build_resident_list(session: AsyncSession, resident_db_id: int, page: 
             pag_row.append(InlineKeyboardButton(text="▶️", callback_data=f"res_list:{page+1}"))
         kb_rows.append(pag_row)
 
+    await session.commit()
     return text, InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
 async def build_resident_detail(session: AsyncSession, request_id: int, page: int, viewer: User) -> tuple[str, InlineKeyboardMarkup]:
@@ -305,12 +325,18 @@ async def build_resident_detail(session: AsyncSession, request_id: int, page: in
         if w:
             w_str = w.full_name or str(w.telegram_id)
 
+    description = await localize_request_description(
+        session, req, viewer.language, commit_immediately=True
+    )
+    description_html = format_description_html(description, viewer.language)
+    await session.commit()
+
     text = (
         f"🧾 <b>Заявка #{req.id}</b>\n"
         f"{CATEGORY_LABELS.get(req.category, req.category)} • {STATUS_LABELS.get(req.status, req.status)}\n"
         f"{URGENCY_LABELS.get(req.urgency, req.urgency)} приоритет\n\n"
         f"🧰 <b>Исполнитель:</b> {escape(w_str)}\n\n"
-        f"📝 <b>Описание</b>\n{escape(req.description)}\n\n"
+        f"{description_html}\n\n"
         f"{'📍 <b>Место:</b> внутри квартиры' + chr(10) if req.service_area == 'apartment' else ''}"
         f"{'📍 <b>Место:</b> МОП / общее имущество' + chr(10) if req.service_area == 'common' else ''}"
         f"{'📎 <b>Вложений:</b> ' + str(len(req.attachments)) + chr(10) if req.attachments else ''}"
@@ -440,23 +466,46 @@ def _created_text(req: Request, category: str, urgency: str | None, ai: bool) ->
     )
 
 
-async def _notify_new_request(bot: Bot, session: AsyncSession, req: Request, user: User,
-                              category: str, description: str) -> None:
+async def _notify_new_request(
+    bot: Bot,
+    session: AsyncSession,
+    req: Request,
+    user: User,
+    category: str,
+) -> None:
     if req.approval_status == "pending":
         await notify_administrators(
-            bot, session,
-            f"📹 Заявка Казахдомофон #{req.id} ожидает согласования.\n"
-            f"Житель: {escape(user.full_name or '')}, кв. {escape(user.apartment or '?')}\n"
-            f"{escape(description)}",
+            bot,
+            session,
+            "",
+            message_key="new_kazakhdomofon_request_admin",
+            message_values={
+                "id": req.id,
+                "resident": escape(user.full_name or ""),
+                "apartment": escape(user.apartment or "?"),
+            },
+            request=req,
+            commit_translations=True,
+            parse_mode="HTML",
         )
+        await session.commit()
         return
     if category == "cleaning":
         await notify_administrators(
-            bot, session,
-            f"🧹 Новая заявка клининга #{req.id} (просмотр).\n"
-            f"Кв. {escape(user.apartment or '?')}: {escape(description[:500])}",
+            bot,
+            session,
+            "",
+            message_key="new_cleaning_request_admin",
+            message_values={
+                "id": req.id,
+                "apartment": escape(user.apartment or "?"),
+            },
+            request=req,
+            commit_translations=True,
+            parse_mode="HTML",
         )
         if req.dispatch_after is not None:
+            await session.commit()
             return
     report = await notify_workers(
         bot,
@@ -470,8 +519,9 @@ async def _notify_new_request(bot: Bot, session: AsyncSession, req: Request, use
             "category": category,
             "address": escape(user.apartment or "?"),
             "resident": escape(user.full_name or ""),
-            "description": escape(description[:500]),
         },
+        request=req,
+        commit_translations=True,
     )
     if report.delivered == 0:
         await notify_dispatchers(
@@ -481,6 +531,7 @@ async def _notify_new_request(bot: Bot, session: AsyncSession, req: Request, use
             message_key="no_available_workers",
             message_values={"id": req.id},
         )
+    await session.commit()
 
 
 def _service_area_keyboard() -> InlineKeyboardMarkup:
@@ -537,7 +588,7 @@ async def _create_direct_request(
             user.language, is_owner=user.resident_subrole == "owner"
         ),
     )
-    await _notify_new_request(bot, session, req, user, category, description)
+    await _notify_new_request(bot, session, req, user, category)
     return req
 
 
@@ -619,7 +670,7 @@ async def choose_category(callback: CallbackQuery, state: FSMContext, session: A
                 user.language, is_owner=user.resident_subrole == "owner"
             ),
         )
-        await _notify_new_request(bot, session, req, user, category, description)
+        await _notify_new_request(bot, session, req, user, category)
         await callback.answer()
         return
 
@@ -681,9 +732,7 @@ async def choose_service_area(
                 user.language, is_owner=user.resident_subrole == "owner"
             ),
         )
-        await _notify_new_request(
-            bot, session, req, user, category, description
-        )
+        await _notify_new_request(bot, session, req, user, category)
         await callback.answer()
         return
     await state.set_state(RequestStates.waiting_description)
@@ -1034,7 +1083,7 @@ async def _create_checked_request(
             user.language, is_owner=user.resident_subrole == "owner"
         ),
     )
-    await _notify_new_request(bot, session, req, user, category, description)
+    await _notify_new_request(bot, session, req, user, category)
 
 
 def _duplicate_decision_keyboard(request_id: int) -> InlineKeyboardMarkup:
@@ -1126,7 +1175,7 @@ async def resolve_duplicate(callback: CallbackQuery, state: FSMContext, session:
             user.language, is_owner=user.resident_subrole == "owner"
         ),
     )
-    await _notify_new_request(bot, session, req, user, draft["category"], draft["description"])
+    await _notify_new_request(bot, session, req, user, draft["category"])
     await callback.answer()
 
 

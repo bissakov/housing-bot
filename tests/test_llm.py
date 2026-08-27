@@ -1,6 +1,25 @@
 import json
+from unittest.mock import AsyncMock
+
 import pytest
 from bot.services.llm.client import LLMClient, ClassifyResult, DuplicateResult
+
+
+@pytest.mark.asyncio
+async def test_translate_request_uses_structured_response():
+    c = LLMClient(api_key="sk-test", enabled=True)
+    c._chat = AsyncMock(
+        return_value='{"translation":"Ас үйде құбыр ағып жатыр"}'
+    )
+
+    translated = await c.translate_request("На кухне течёт труба", "kk")
+
+    assert translated == "Ас үйде құбыр ағып жатыр"
+    payload = json.loads(c._chat.await_args.args[0][1]["content"])
+    assert payload == {
+        "text": "На кухне течёт труба",
+        "target_language": "kk",
+    }
 
 @pytest.mark.asyncio
 async def test_classify_and_enrich_parses_json():

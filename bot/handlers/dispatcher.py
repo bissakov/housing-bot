@@ -17,6 +17,11 @@ from bot.keyboards import (
 )
 from bot.services.requests import assign_request, create_announcement
 from bot.services.llm import get_llm
+from bot.services.request_translations import (
+    format_description_html,
+    localize_request_description,
+    localize_request_descriptions,
+)
 from bot.services.identity import delivery_telegram_id, get_actor
 from bot.services.notify import broadcast_announcement, send_to_user
 from bot.services.schedules import (
@@ -119,6 +124,7 @@ async def build_dispatcher_list(
     page: int,
     status: str = "all",
     category: str = "all",
+    language: str | None = "ru",
 ) -> tuple[str, InlineKeyboardMarkup]:
     total = await _total_requests(session, status, category)
     total_pages = (total + PAGE_SIZE - 1) // PAGE_SIZE if total else 1
@@ -145,6 +151,10 @@ async def build_dispatcher_list(
         ]])
         return "🔎 По выбранным фильтрам заявок нет.", empty_kb
 
+    localized_descriptions = await localize_request_descriptions(
+        session, reqs, language, commit_immediately=True
+    )
+
     # Build compact text
     status_name = "Все статусы" if status == "all" else STATUS_LABELS.get(status, status)
     category_name = "Все категории" if category == "all" else CATEGORY_LABELS.get(category, category)
@@ -163,14 +173,15 @@ async def build_dispatcher_list(
         w_str = ""
         if req.worker:
             w_str = f" → {escape(req.worker.full_name or str(req.worker.telegram_id))}"
-        desc = escape(req.description.strip().replace("\n", " "))
-        if len(desc) > 60:
-            desc = desc[:60] + "…"
+        description = localized_descriptions[req.id]
+        desc = format_description_html(
+            description, language, compact=True, limit=60
+        )
         date = format_local(req.created_at, "%d.%m %H:%M", "")
         lines.append(
             f"<b>#{req.id}</b> {CATEGORY_LABELS.get(req.category, req.category)} {STATUS_LABELS.get(req.status, req.status)}{w_str}\n"
             f"{resident_str} • {date}\n"
-            f"<i>{desc}</i>\n"
+            f"{desc}\n"
         )
 
     text = "\n".join(lines)
@@ -233,6 +244,7 @@ async def build_dispatcher_list(
             text="✖️ Сбросить фильтры", callback_data="disp_filter:0:all:all"
         )])
 
+    await session.commit()
     return text, InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
 
@@ -242,6 +254,7 @@ async def build_request_detail(
     page: int,
     *,
     can_delete: bool = False,
+    language: str | None = "ru",
 ) -> tuple[str, InlineKeyboardMarkup]:
     q = await session.execute(
         select(Request)
@@ -259,6 +272,12 @@ async def build_request_detail(
         wres = await session.execute(select(User).where(User.id == req.worker_id))
         w = wres.scalar_one_or_none()
 
+    description = await localize_request_description(
+        session, req, language, commit_immediately=True
+    )
+    description_html = format_description_html(description, language)
+    await session.commit()
+
     text = (
         f"🧾 <b>Заявка #{req.id}</b>\n"
         f"{CATEGORY_LABELS.get(req.category, req.category)} • {STATUS_LABELS.get(req.status, req.status)}\n"
@@ -266,7 +285,7 @@ async def build_request_detail(
         f"👤 <b>Житель:</b> {escape(resident.full_name or '') if resident else '?'}"
         f" • кв. {escape(resident.apartment or '?') if resident else '?'}\n"
         f"🧰 <b>Исполнитель:</b> {escape(w.full_name or str(w.telegram_id)) if w else 'не назначен'}\n\n"
-        f"📝 <b>Описание</b>\n{escape(req.description)}\n\n"
+        f"{description_html}\n\n"
         f"{'📍 <b>Место:</b> внутри квартиры' + chr(10) if req.service_area == 'apartment' else ''}"
         f"{'📍 <b>Место:</b> МОП / общее имущество' + chr(10) if req.service_area == 'common' else ''}"
         f"{'📎 <b>Вложений:</b> ' + str(len(req.attachments)) + chr(10) if req.attachments else ''}"
@@ -416,7 +435,10 @@ async def dispatcher_report_callback(
             return
         action = "o"
     if action == "x":
-        await callback.message.answer_document(await export_csv(session, filters), caption="Отчёт готов")
+        await callback.message.answer_document(
+            await export_csv(session, filters, language=user.language),
+            caption="Отчёт готов",
+        )
         await callback.answer()
         return
     if action == "f":
@@ -490,7 +512,9 @@ async def all_requests(message: Message, session: AsyncSession):
     if not user or not _is_dispatcher(user):
         await message.answer("Только для диспетчеров.")
         return
-    text, kb = await build_dispatcher_list(session, page=0)
+    text, kb = await build_dispatcher_list(
+        session, page=0, language=user.language
+    )
     await message.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
@@ -502,7 +526,7 @@ async def disp_list(callback: CallbackQuery, session: AsyncSession):
         await callback.answer("Нет прав", show_alert=True)
         return
     page = int(callback.data.split(":")[1])
-    text, kb = await build_dispatcher_list(session, page)
+    text, kb = await build_dispatcher_list(session, page, language=user.language)
     try:
         await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
     except Exception:
@@ -527,7 +551,9 @@ async def disp_filter(callback: CallbackQuery, session: AsyncSession):
         status = "all"
     if category not in {"all", *REQUEST_CATEGORIES}:
         category = "all"
-    text, kb = await build_dispatcher_list(session, page, status, category)
+    text, kb = await build_dispatcher_list(
+        session, page, status, category, language=user.language
+    )
     try:
         await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
     except Exception:
@@ -559,6 +585,7 @@ async def req_view(
         req_id,
         page,
         can_delete=is_administrator(user),
+        language=user.language,
     )
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
     await _send_request_attachments(bot, session, callback.from_user.id, req_id)
@@ -581,6 +608,7 @@ async def filtered_req_view(
         callback_data.request_id,
         callback_data.page,
         can_delete=is_administrator(user),
+        language=user.language,
     )
     rows = [list(row) for row in kb.inline_keyboard]
     rows[-1] = [InlineKeyboardButton(
@@ -691,7 +719,7 @@ async def paginate_compat(callback: CallbackQuery, session: AsyncSession):
     if not user or not _is_dispatcher(user):
         await callback.answer("Нет прав", show_alert=True)
         return
-    text, kb = await build_dispatcher_list(session, page)
+    text, kb = await build_dispatcher_list(session, page, language=user.language)
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
     await callback.answer()
 
@@ -755,9 +783,16 @@ async def do_assign(callback: CallbackQuery, session: AsyncSession, bot: Bot):
     req = q.scalar_one_or_none()
     if worker and req:
         try:
+            localized = await localize_request_description(
+                session, req, worker.language, commit_immediately=True
+            )
+            description_html = format_description_html(
+                localized, worker.language
+            )
+            await session.commit()
             await send_to_user(
                 bot, session, worker,
-                f"📌 Вам назначена заявка #{req.id}\n{escape(req.description[:500])}",
+                f"📌 Вам назначена заявка #{req.id}\n\n{description_html}",
             )
         except Exception:
             pass
@@ -846,6 +881,12 @@ async def build_pending_list(
             .where(Request.id.in_(request_ids))
         )
         requests = {request.id: request for request in request_result.scalars()}
+    localized_descriptions = await localize_request_descriptions(
+        session,
+        list(requests.values()),
+        language,
+        commit_immediately=True,
+    )
 
     lines = [t(
         "pending_items_heading",
@@ -874,9 +915,10 @@ async def build_pending_list(
         else:
             request = requests[item.item_id]
             resident = request.resident
-            description = escape(request.description.strip().replace("\n", " "))
-            if len(description) > 80:
-                description = description[:80] + "…"
+            localized = localized_descriptions[request.id]
+            description = format_description_html(
+                localized, language, compact=True, limit=80
+            )
             lines.append(t(
                 "pending_request_item",
                 language,
@@ -914,6 +956,7 @@ async def build_pending_list(
         if page < total_pages - 1:
             pag.append(InlineKeyboardButton(text="Вперед ▶️", callback_data=f"pend_list:{page+1}"))
         rows.append(pag)
+    await session.commit()
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 async def build_pending_detail(
@@ -1006,7 +1049,11 @@ async def pending_request_view(
         await callback.answer("Только для председателя", show_alert=True)
         return
     text, kb = await build_request_detail(
-        session, request_id, page, can_delete=True
+        session,
+        request_id,
+        page,
+        can_delete=True,
+        language=viewer.language,
     )
     rows = [list(row) for row in kb.inline_keyboard]
     rows[-1] = [InlineKeyboardButton(

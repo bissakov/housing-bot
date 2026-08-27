@@ -12,6 +12,7 @@ from .prompts import (
     COMPLETION_COMMENT_PROMPT,
     DUPLICATE_PROMPT,
     POLISH_PROMPT,
+    TRANSLATE_REQUEST_PROMPT,
     TRIAGE_PROMPT,
 )
 from bot.constants import REQUEST_CATEGORIES
@@ -242,6 +243,33 @@ class LLMClient:
         if pri not in ("low", "normal", "high"):
             pri = "normal"
         return TriageResult(priority=pri, summary=str(d.get("summary",""))[:200], hint=str(d.get("hint",""))[:200])
+
+    async def translate_request(self, text: str, target_language: str) -> str:
+        """Translate a request description without enriching or interpreting it."""
+        if target_language not in {"kk", "ru"}:
+            raise ValueError("Unsupported target language")
+        source = (text or "").strip()[:MAX_INPUT_CHARS]
+        if not source:
+            return ""
+        content = await self._chat(
+            [
+                {"role": "system", "content": TRANSLATE_REQUEST_PROMPT},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {"text": source, "target_language": target_language},
+                        ensure_ascii=False,
+                    ),
+                },
+            ],
+            temperature=0.0,
+            max_tokens=700,
+            json_mode=True,
+        )
+        translated = str(self._parse_json(content).get("translation", "")).strip()
+        if not translated:
+            raise ValueError("LLM returned an empty translation")
+        return translated[:MAX_INPUT_CHARS]
 
     async def check_duplicate(
         self,
